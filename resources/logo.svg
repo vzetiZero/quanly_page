@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1">
+      <stop offset="0" stop-color="#0f766e" />
+      <stop offset="1" stop-color="#2563eb" />
+    </linearGradient>
+  </defs>
+  <rect rx="60" ry="60" width="512" height="512" fill="url(#g)" />
+  <text x="50%" y="54%" font-family="Segoe UI, Arial" font-size="180" fill="#ffffff" text-anchor="middle" dominant-baseline="middle">FB</text>
+  <text x="50%" y="80%" font-family="Segoe UI, Arial" font-size="36" fill="#e6f0ff" text-anchor="middle">Page Manager</text>
+</svg>

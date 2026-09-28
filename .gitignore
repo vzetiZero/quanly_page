@@ -1,0 +1,43 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ── Môi trường ảo ───────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Bí mật / dữ liệu cục bộ (KHÔNG đẩy lên) ─────────────
+token.txt
+.env
+.env.*
+facebook_config.json
+package_defaults/facebook_config.local.json
+facebook_cache.sqlite3
+*.sqlite3
+*.sqlite3-journal
+facebook_scraper.log
+license_state.json
+.fb_license_state.dat
+output/
+.cache/
+
+# ── Build ───────────────────────────────────────────────
+build/
+dist/
+*.spec.bak
+
+# ── Editor / OS ─────────────────────────────────────────
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# ── Tooling của agent ───────────────────────────────────
+.mimocode/
+.agents/
