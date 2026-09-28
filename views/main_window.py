@@ -45,8 +45,24 @@ TOKEN_STATUS_COLORS = {
     "Hết hạn": "#dc2626",
 }
 
+# Màu trạng thái cho hàng đợi đăng: (màu chữ, màu nền)
+CONFIG_STATUS_STYLES = {
+    "Thành công": ("#15803d", "#dcfce7"),
+    "Thất bại": ("#b91c1c", "#fee2e2"),
+    "Lỗi": ("#b91c1c", "#fee2e2"),
+    "Đang đăng": ("#b45309", "#fef3c7"),
+    "Đang chờ lịch": ("#1d4ed8", "#dbeafe"),
+    "Chờ đăng": ("#1d4ed8", "#dbeafe"),
+    "Đã đăng trước đó": ("#64748b", "#f1f5f9"),
+    "Bỏ qua": ("#64748b", "#f1f5f9"),
+    "Hết video mới": ("#b91c1c", "#fee2e2"),
+    "Không có video": ("#b91c1c", "#fee2e2"),
+}
+
 
 class FacebookPageManagerWindow(QtWidgets.QMainWindow):
+    config_status_changed = QtCore.pyqtSignal(str, str)
+
     def __init__(self, container: Any) -> None:
         super().__init__()
         self._container = container
@@ -60,6 +76,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.trial_status_label.setStyleSheet("background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 10px; color: #334155; font-weight: 800;")
 
         self._build_ui()
+        self.config_status_changed.connect(self._apply_config_status)
 
     def set_presenter(self, presenter: Any) -> None:
         self._presenter = presenter
@@ -267,6 +284,10 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.use_comment_images_checkbox.setChecked(False)
         cf_layout.addWidget(self.use_comment_images_checkbox, 4, 2)
 
+        self.apply_content_btn = QtWidgets.QPushButton("Áp dụng nội dung vào hàng đợi")
+        apply_small_button_style(self.apply_content_btn)
+        cf_layout.addWidget(self.apply_content_btn, 5, 2, 1, 2)
+
         return group
 
     def _build_queue_group(self) -> QtWidgets.QGroupBox:
@@ -347,6 +368,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.select_comment_image_folder_btn.clicked.connect(self._select_comment_image_folder)
         self.choose_videos_btn.clicked.connect(self._on_choose_videos)
         self.posted_videos_btn.clicked.connect(self._on_view_posted_videos)
+        self.apply_content_btn.clicked.connect(self._on_apply_quick_content)
 
     def _on_load_tokens(self) -> None:
         dialog = QtWidgets.QFileDialog(self)
@@ -396,19 +418,40 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
     def _on_clear_config(self) -> None:
         self.config_table.setRowCount(0)
 
+    def _config_cell_text(self, row: int, col: int) -> str:
+        item = self.config_table.item(row, col)
+        return item.text().strip() if item is not None else ""
+
     def _on_apply_quick_content(self) -> None:
+        post_content = self.quick_post_content_input.toPlainText().strip()
+        comment_content = self.quick_comment_content_input.toPlainText().strip()
+        if not post_content and not comment_content:
+            self.show_warning("Thiếu nội dung", "Vui lòng nhập 'Nội dung bài đăng' hoặc 'Nội dung comment'.")
+            return
+        if self.config_table.rowCount() == 0:
+            self.show_warning("Hàng đợi trống", "Chưa có page trong hàng đợi. Hãy chọn page rồi bấm 'Chọn video' trước.")
+            return
+        for row_idx in range(self.config_table.rowCount()):
+            if post_content:
+                self._set_table_value(row_idx, 1, post_content)
+                self._set_table_value(row_idx, 2, post_content)
+            self._set_table_value(row_idx, 4, comment_content or post_content)
+        self.show_status(f"Đã áp dụng nội dung vào {self.config_table.rowCount()} dòng")
+
+    def _fill_empty_content_from_quick(self) -> None:
+        """Khi bấm Đăng: tự điền nội dung chung vào các ô còn trống (không ghi đè ô đã có)."""
         post_content = self.quick_post_content_input.toPlainText().strip()
         comment_content = self.quick_comment_content_input.toPlainText().strip()
         if not post_content and not comment_content:
             return
         for row_idx in range(self.config_table.rowCount()):
             if post_content:
-                self._set_table_value(row_idx, 1, post_content)
-                self._set_table_value(row_idx, 2, post_content)
-            if comment_content:
+                if not self._config_cell_text(row_idx, 1):
+                    self._set_table_value(row_idx, 1, post_content)
+                if not self._config_cell_text(row_idx, 2):
+                    self._set_table_value(row_idx, 2, post_content)
+            if comment_content and not self._config_cell_text(row_idx, 4):
                 self._set_table_value(row_idx, 4, comment_content)
-            else:
-                self._set_table_value(row_idx, 4, post_content)
 
     def _select_video_folder(self) -> None:
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Chọn thư mục video")
@@ -493,6 +536,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
                 self._set_table_value(row["row_idx"], 5, comment_files[i])
 
     def _on_post_from_config(self) -> None:
+        self._fill_empty_content_from_quick()
         self.stop_btn.setEnabled(True)
         self._presenter.config.start_posting(
             pages=self._presenter.page_list.pages,
@@ -935,16 +979,35 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         type_item.setText("Feed" if post_type == "feed" else "Reel / video")
         type_item.setTextAlignment(QtCore.Qt.AlignCenter)
         self._set_table_value(row_idx, CONFIG_SCHEDULE_COL, row_data.get("schedule_time", ""))
-        self._set_table_value(row_idx, CONFIG_STATUS_COL, row_data.get("status", "Chờ đăng"))
+        initial_status = row_data.get("status", "Chờ đăng")
+        self._set_table_value(row_idx, CONFIG_STATUS_COL, initial_status)
+        self._apply_config_row_color(row_idx, initial_status)
         self._set_table_value(row_idx, CONFIG_LINK_COL, row_data.get("link", ""))
         self.config_table.setRowHeight(row_idx, 26)
 
-    def update_config_status(self, page_name: str, status: str) -> None:
+    def _apply_config_row_color(self, row_idx: int, status: str) -> None:
+        style = CONFIG_STATUS_STYLES.get(status)
+        if not style:
+            return
+        foreground, background = style
+        for col in (0, CONFIG_STATUS_COL):
+            item = self.config_table.item(row_idx, col)
+            if item is not None:
+                item.setForeground(QtGui.QColor(foreground))
+                item.setBackground(QtGui.QColor(background))
+
+    def _apply_config_status(self, page_name: str, status: str) -> None:
+        """Cập nhật trạng thái + màu ở luồng chính (được gọi qua signal)."""
         for row in range(self.config_table.rowCount()):
             item = self.config_table.item(row, 0)
             if item and item.text().strip() == page_name:
                 self._set_table_value(row, CONFIG_STATUS_COL, status)
+                self._apply_config_row_color(row, status)
                 return
+
+    def update_config_status(self, page_name: str, status: str) -> None:
+        # Phát signal để tô màu ở luồng chính (an toàn khi đăng đồng thời).
+        self.config_status_changed.emit(page_name, status)
 
     def update_config_link(self, row_idx: int, link: str) -> None:
         if 0 <= row_idx < self.config_table.rowCount():
