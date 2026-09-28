@@ -8,7 +8,13 @@ logger = logging.getLogger("facebook_ui")
 # Metric lượt xem video ở cấp Page (cần quyền read_insights).
 PAGE_VIDEO_VIEW_METRICS = ["page_video_views", "page_video_views_organic"]
 # Metric ở cấp từng video (dự phòng, cho tổng view trọn đời).
-VIDEO_INSIGHT_METRICS = ["total_video_views", "post_video_views", "video_views"]
+VIDEO_INSIGHT_METRICS = [
+    "total_video_views",
+    "post_video_views",
+    "blue_reels_play_count",
+    "video_views",
+    "post_video_impressions",
+]
 # Số video tối đa lấy về để đếm + cộng view (tránh chạy quá lâu).
 MAX_VIDEOS = 200
 
@@ -85,38 +91,58 @@ class StatsService:
         return {"followers_count": payload.get("followers_count"), "fan_count": payload.get("fan_count")}
 
     def _page_videos(self, page_id: str, token: str, max_videos: int = MAX_VIDEOS) -> List[str]:
-        """Danh sách id video thật trên page (phân trang)."""
+        """Danh sách id video thật trên page (khử trùng, gộp cả reels)."""
         ids: List[str] = []
-        after = None
-        while len(ids) < max_videos:
-            params: Dict[str, Any] = {"access_token": token, "fields": "id", "limit": 100}
-            if after:
-                params["after"] = after
-            payload, error = self._get(f"/{page_id}/videos", params)
-            if error is not None or not isinstance(payload, dict):
-                logger.info("Không lấy được video của page %s: %s", page_id, error)
-                break
-            data = payload.get("data", []) or []
-            for item in data:
-                if isinstance(item, dict) and item.get("id"):
-                    ids.append(str(item["id"]))
-            after = (payload.get("paging", {}) or {}).get("cursors", {}).get("after")
-            if not data or not after:
-                break
+        seen = set()
+        for edge in ("videos", "video_reels"):
+            after = None
+            while len(ids) < max_videos:
+                params: Dict[str, Any] = {"access_token": token, "fields": "id", "limit": 100}
+                if after:
+                    params["after"] = after
+                payload, error = self._get(f"/{page_id}/{edge}", params)
+                if error is not None or not isinstance(payload, dict):
+                    logger.info("Không lấy được '%s' của page %s: %s", edge, page_id, error)
+                    break
+                data = payload.get("data", []) or []
+                for item in data:
+                    video_id = str(item.get("id")) if isinstance(item, dict) and item.get("id") else ""
+                    if video_id and video_id not in seen:
+                        seen.add(video_id)
+                        ids.append(video_id)
+                after = (payload.get("paging", {}) or {}).get("cursors", {}).get("after")
+                if not data or not after:
+                    break
+        logger.info("Page %s: tìm thấy %d video trên page", page_id, len(ids))
         return ids[:max_videos]
+
+    def _video_views(self, token: str, video_id: str) -> Optional[int]:
+        """Lấy view của 1 video; thử nhiều metric và chọn giá trị lớn nhất (khác 0)."""
+        best: Optional[int] = None
+        for metric in VIDEO_INSIGHT_METRICS:
+            payload, error = self._get(f"/{video_id}/video_insights", {"access_token": token, "metric": metric})
+            if error is not None:
+                continue
+            value = self._sum_insight_values(payload)
+            if value is None:
+                continue
+            if best is None or value > best:
+                best = value
+            logger.debug("video %s metric %s = %s", video_id, metric, value)
+        if best is not None:
+            logger.info("video %s: view = %s", video_id, best)
+        else:
+            logger.info("video %s: không lấy được metric view", video_id)
+        return best
 
     def _sum_video_views(self, token: str, video_ids: List[str]) -> Optional[int]:
         total = 0
         found = False
         for video_id in video_ids:
-            for metric in VIDEO_INSIGHT_METRICS:
-                payload, error = self._get(f"/{video_id}/video_insights", {"access_token": token, "metric": metric})
-                if error is None:
-                    value = self._sum_insight_values(payload)
-                    if value is not None:
-                        total += value
-                        found = True
-                        break
+            value = self._video_views(token, video_id)
+            if value is not None:
+                total += value
+                found = True
         return total if found else None
 
     def _page_video_views(self, page_id: str, token: str) -> Optional[int]:

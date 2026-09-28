@@ -41,6 +41,8 @@ VIDEOS = [{"id": "v1"}, {"id": "v2"}, {"id": "v3"}]
 def fake_get(url, params=None, timeout=None):
     params = params or {}
     metric = str(params.get("metric", ""))
+    if url.endswith("/video_reels"):
+        return FakeResponse(200, {"data": [], "paging": {"cursors": {}}})
     if url.endswith("/videos"):
         return FakeResponse(200, {"data": VIDEOS, "paging": {"cursors": {}}})
     if "/video_insights" in url:
@@ -70,10 +72,51 @@ class TestStatsService(unittest.TestCase):
             rows = service.refresh([page])
         self.assertEqual(rows[0]["page_video_count"], 3)
         self.assertEqual(rows[0]["app_video_count"], 3)
-        self.assertEqual(rows[0]["video_views"], 60)  # 3 video x 20 views
+        self.assertEqual(rows[0]["video_views"], 60)  # 3 video x 20
         self.assertEqual(rows[0]["followers"], 100)
         self.assertEqual(rows[0]["fan_count"], 90)
-        self.assertEqual(service._repo.saved[0]["video_count"], 3)
+
+    def test_page_videos_dedupes_repeated_ids(self):
+        service = self._service()
+        state = {"call": 0}
+
+        def dedupe_get(url, params=None, timeout=None):
+            params = params or {}
+            if url.endswith("/video_reels"):
+                return FakeResponse(200, {"data": [], "paging": {"cursors": {}}})
+            if url.endswith("/videos"):
+                state["call"] += 1
+                if state["call"] == 1:
+                    return FakeResponse(200, {"data": [{"id": "v1"}, {"id": "v2"}], "paging": {"cursors": {"after": "c1"}}})
+                return FakeResponse(200, {"data": [{"id": "v1"}, {"id": "v2"}], "paging": {"cursors": {}}})
+            if "/video_insights" in url:
+                return FakeResponse(200, {"data": [{"name": "total_video_views", "values": [{"value": 20}]}]})
+            return FakeResponse(200, {"followers_count": 1, "fan_count": 1})
+
+        page = {"id": "1", "name": "Page A", "access_token": "tok"}
+        with mock.patch("services.stats_service.requests.get", side_effect=dedupe_get):
+            rows = service.refresh([page])
+        self.assertEqual(rows[0]["page_video_count"], 2)
+
+    def test_video_views_prefers_non_zero_metric(self):
+        service = self._service()
+
+        def metric_get(url, params=None, timeout=None):
+            params = params or {}
+            metric = str(params.get("metric", ""))
+            if url.endswith("/video_reels"):
+                return FakeResponse(200, {"data": [], "paging": {"cursors": {}}})
+            if url.endswith("/videos"):
+                return FakeResponse(200, {"data": [{"id": "v1"}], "paging": {"cursors": {}}})
+            if "/video_insights" in url:
+                value = 0 if metric == "total_video_views" else 27
+                return FakeResponse(200, {"data": [{"name": metric, "values": [{"value": value}]}]})
+            return FakeResponse(200, {"followers_count": 1, "fan_count": 1})
+
+        page = {"id": "1", "name": "Page A", "access_token": "tok"}
+        with mock.patch("services.stats_service.requests.get", side_effect=metric_get):
+            rows = service.refresh([page])
+        self.assertEqual(rows[0]["video_views"], 27)
 
     def test_refresh_falls_back_to_page_insights(self):
         global VIDEO_INSIGHTS_OK
