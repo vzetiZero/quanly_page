@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
@@ -203,6 +204,14 @@ class StatsService:
                 page_key, page_name,
                 page_video_count or 0, video_views, followers, fan_count,
             )
+
+            status = "ok"
+            status_text = "Thành công"
+            if not token:
+                status, status_text = "error", "Thiếu token"
+            elif page_video_count is None and video_views is None and followers is None and fan_count is None:
+                status, status_text = "error", "Không lấy được dữ liệu"
+
             row = {
                 "page": page_name,
                 "page_key": page_key,
@@ -211,7 +220,9 @@ class StatsService:
                 "video_views": video_views,
                 "followers": followers,
                 "fan_count": fan_count,
-                "updated_at": "",
+                "status": status,
+                "status_text": status_text,
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S") if status == "ok" else "",
             }
             rows.append(row)
             if on_page:

@@ -538,6 +538,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
             self.show_warning("Chưa có page", "Vui lòng chọn ít nhất 1 page hoặc lấy danh sách page trước.")
             return
         self.stats_tab.set_busy(True)
+        self.stats_tab.mark_checking([p.get("name") or p.get("id") for p in pages])
 
         def worker():
             try:
