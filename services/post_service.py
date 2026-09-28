@@ -400,12 +400,12 @@ class PostService:
         failure_reasons: List[tuple] = []
         page_pool = {str(p.get("id") or ""): p for p in pages or [] if p.get("id")}
 
-        def record_failure(page_name: str, reason: str) -> None:
+        def record_failure(page_name: str, reason: str, page_id: str = "") -> None:
             nonlocal fail_count
             fail_count += 1
             failure_reasons.append((page_name, reason))
             logger.error("Đăng thất bại | page=%s | %s", page_name, reason)
-            on_config_status(page_name, "Thất bại")
+            on_config_status(page_name, "Thất bại", page_id)
             on_status(page_name, "Thất bại", reason)
 
         def worker(entry: Dict[str, Any], start_delay: float = 0.0) -> None:
@@ -418,29 +418,30 @@ class PostService:
             if self.stop_requested:
                 return
             page_name = entry["page_name"]
+            page_id = str(entry.get("page_id") or "")
             title = entry["title"]
             description = entry.get("description", "")
             video_path = entry["video_path"]
 
             if video_path and Path(video_path).name in self.load_posted_video_names(page_name):
-                on_config_status(page_name, "Đã đăng trước đó")
+                on_config_status(page_name, "Đã đăng trước đó", page_id)
                 on_status(page_name, "Bỏ qua", "Video đã đăng cho page này, không đăng lại")
                 entry["result"] = {"skipped": True, "reason": "already_posted"}
                 return
 
-            on_config_status(page_name, "Đang đăng")
+            on_config_status(page_name, "Đang đăng", page_id)
             on_status(page_name, "Đang đăng", "Đang gửi yêu cầu tới Facebook")
 
             try:
                 if not video_path:
-                    record_failure(page_name, "Dòng này chưa có video, hãy bấm 'Chọn video' để gán video.")
+                    record_failure(page_name, "Dòng này chưa có video, hãy bấm 'Chọn video' để gán video.", page_id)
                     return
-                matching_page = self._match_page(pages, page_name, entry.get("page_id"))
+                matching_page = self._match_page(pages, page_name, page_id)
                 if not matching_page:
-                    record_failure(page_name, "Không tìm thấy page trong danh sách (tên/id không khớp).")
+                    record_failure(page_name, "Không tìm thấy page trong danh sách (tên/id không khớp).", page_id)
                     return
                 if not str(matching_page.get("access_token") or "").strip():
-                    record_failure(page_name, "Thiếu Page Access Token cho page này.")
+                    record_failure(page_name, "Thiếu Page Access Token cho page này.", page_id)
                     return
 
                 schedule_time = entry.get("schedule_time")
@@ -448,7 +449,7 @@ class PostService:
                     try:
                         parsed = datetime.fromisoformat(schedule_time)
                         if parsed > datetime.now():
-                            on_config_status(page_name, "Đang chờ lịch")
+                            on_config_status(page_name, "Đang chờ lịch", page_id)
                             time.sleep(max(0, (parsed - datetime.now()).total_seconds()))
                     except Exception:
                         pass

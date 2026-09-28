@@ -34,6 +34,24 @@ class PageListPresenter:
         if page is not None:
             page["status"] = status
 
+    def set_post_status_for_page(self, page_id: str, page_name: str, status: str) -> List[str]:
+        """Gán trạng thái đăng cho mọi page khớp id (ưu tiên) rồi tới tên.
+
+        Trả về danh sách ``key`` đã cập nhật để view vẽ lại đúng dòng.
+        """
+        target_id = str(page_id or "").strip()
+        target_name = str(page_name or "").strip()
+        keys: List[str] = []
+        for page in self.pages:
+            matches = bool(target_id) and str(page.get("id", "")).strip() == target_id
+            if not matches and not target_id and target_name:
+                matches = str(page.get("name", "")).strip() == target_name
+            if matches:
+                key = self.page_key(page)
+                self.page_post_statuses[key] = status
+                keys.append(key)
+        return keys
+
     # ── Tải dữ liệu ───────────────────────────────────────────────
     def load_all_from_cache(self) -> None:
         self.pages = self._page_service.load_all_from_cache()

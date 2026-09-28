@@ -1,4 +1,5 @@
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -26,7 +27,7 @@ from views.settings_tab import SettingsTab
 from views.license_dialog import TrialLicenseDialog
 from views.stats_tab import StatsTab
 
-CONFIG_HEADERS = ["Page", "Tiêu đề", "Mô tả", "Đường dẫn video", "Comment", "Đường dẫn ảnh comment", "Loại đăng", "Thời gian đăng", "Trạng thái", "Link"]
+CONFIG_HEADERS = ["Page", "Tiêu đề", "Mô tả", "Đường dẫn video", "Comment", "Đường dẫn ảnh comment", "Loại đăng", "Thời gian đăng", "Trạng thái", "Link", "Đã đăng lúc"]
 CONFIG_PAGE_COL = 0
 CONFIG_TITLE_COL = 1
 CONFIG_DESCRIPTION_COL = 2
@@ -34,6 +35,7 @@ CONFIG_VIDEO_COL = 3
 CONFIG_COMMENT_COL = 4
 CONFIG_STATUS_COL = 8
 CONFIG_LINK_COL = 9
+CONFIG_POSTED_AT_COL = 10
 CONFIG_COMMENT_IMAGE_COL = 5
 CONFIG_POST_TYPE_COL = 6
 CONFIG_SCHEDULE_COL = 7
@@ -65,9 +67,25 @@ CONFIG_STATUS_STYLES = {
     "Không có video": ("#b91c1c", "#fee2e2"),
 }
 
+# Màu cột "Trạng thái đăng" ở bảng page (chấp nhận cả tiếng Việt lẫn tiếng Anh
+# vì trạng thái đến từ nhiều nơi: hàng đợi, chạy nhanh, kiểm tra token).
+PAGE_POST_STATUS_STYLES = {
+    "thành công": ("#15803d", "#dcfce7"),
+    "success": ("#15803d", "#dcfce7"),
+    "thất bại": ("#b91c1c", "#fee2e2"),
+    "failed": ("#b91c1c", "#fee2e2"),
+    "lỗi": ("#b91c1c", "#fee2e2"),
+    "đang đăng": ("#b45309", "#fef3c7"),
+    "đang chờ lịch": ("#b45309", "#fef3c7"),
+    "đã dừng": ("#64748b", "#f1f5f9"),
+    "bỏ qua": ("#64748b", "#f1f5f9"),
+    "chờ xử lý": ("#1d4ed8", "#dbeafe"),
+    "hết video mới": ("#b91c1c", "#fee2e2"),
+}
+
 
 class FacebookPageManagerWindow(QtWidgets.QMainWindow):
-    config_status_changed = QtCore.pyqtSignal(str, str)
+    config_status_changed = QtCore.pyqtSignal(str, str, str)
     config_link_changed = QtCore.pyqtSignal(str, str)
 
     def __init__(self, container: Any) -> None:
@@ -332,6 +350,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.config_table.setColumnWidth(CONFIG_POST_TYPE_COL, 110)
         self.config_table.setColumnWidth(CONFIG_STATUS_COL, 110)
         self.config_table.setColumnWidth(CONFIG_LINK_COL, 220)
+        self.config_table.setColumnWidth(CONFIG_POSTED_AT_COL, 130)
         self.config_table.verticalHeader().setDefaultSectionSize(26)
         self.config_table.verticalHeader().setVisible(False)
         self.config_table.setMinimumHeight(160)
@@ -507,6 +526,28 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
             f"Đã áp dụng vào {row_count} dòng: {title_changed} tiêu đề, {comment_changed} comment"
         )
 
+    def _mark_queue_pending(self) -> None:
+        """Bấm Đăng: đặt sẵn trạng thái 'Chờ xử lý' cho các dòng sẽ đăng,
+        đồng thời đồng bộ sang cột 'Trạng thái đăng' ở bảng danh sách page."""
+        for row in range(self.config_table.rowCount()):
+            page_item = self.config_table.item(row, CONFIG_PAGE_COL)
+            if page_item is None or not page_item.text().strip():
+                continue
+            if not self._config_cell_text(row, CONFIG_VIDEO_COL):
+                continue
+            self._set_table_value(row, CONFIG_STATUS_COL, "Chờ xử lý")
+            self._apply_config_row_color(row, "Chờ xử lý")
+            page_id = str(page_item.data(QtCore.Qt.UserRole) or "")
+            keys = self._presenter.page_list.set_post_status_for_page(
+                page_id, page_item.text().strip(), "Chờ xử lý"
+            )
+            for key in keys:
+                for view_row in range(self.page_table.rowCount()):
+                    check_item = self.page_table.item(view_row, PAGE_COL_SELECT)
+                    if check_item is not None and str(check_item.data(QtCore.Qt.UserRole) or "") == key:
+                        self._style_post_status_item(view_row, "Chờ xử lý", key)
+                        break
+
     def _fill_empty_content_from_quick(self) -> None:
         """Khi bấm Đăng: tự điền nội dung chung vào ô còn trống (không ghi đè ô đã có)."""
         post_content = self.quick_post_content_input.toPlainText().strip()
@@ -603,6 +644,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
 
     def _on_post_from_config(self) -> None:
         self._fill_empty_content_from_quick()
+        self._mark_queue_pending()
         self.stop_btn.setEnabled(True)
         self._presenter.config.start_posting(
             pages=self._presenter.page_list.pages,
@@ -967,14 +1009,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
             status_item.setFont(font)
             self.page_table.setItem(row, PAGE_COL_TOKEN_STATUS, status_item)
             post_status = self._presenter.page_list.page_post_statuses.get(key, "Chưa đăng")
-            post_item = QtWidgets.QTableWidgetItem(post_status)
-            if "Success" in post_status:
-                post_item.setForeground(QtGui.QColor("#22c55e"))
-            elif "Failed" in post_status:
-                post_item.setForeground(QtGui.QColor("#ef4444"))
-            else:
-                post_item.setForeground(QtGui.QColor("#cbd5e1"))
-            self.page_table.setItem(row, PAGE_COL_POST_STATUS, post_item)
+            self._style_post_status_item(row, post_status, key)
             self.page_table.setItem(row, PAGE_COL_ACCOUNT, QtWidgets.QTableWidgetItem(page.get("account_label", "")))
             page_id_item = QtWidgets.QTableWidgetItem(str(page.get("id", "")))
             page_id_item.setForeground(QtGui.QColor("#2563eb"))
@@ -1010,8 +1045,48 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
                     cell.setForeground(QtGui.QColor("#22c55e"))
                 return
 
-    def set_page_post_status(self, page_id: str, status: str) -> None:
-        self._presenter.page_list.page_post_statuses[page_id] = status
+    def _post_status_style(self, status: str):
+        """Tra về (mau_chu, mau_nen) cho trạng thái đăng; không khớp thì màu xám."""
+        text = str(status or "").strip()
+        for needle, style in PAGE_POST_STATUS_STYLES.items():
+            if needle in text.lower():
+                return style
+        return ("#64748b", None)
+
+    def _style_post_status_item(self, row: int, status: str, key: str = "") -> None:
+        foreground, background = self._post_status_style(status)
+        item = self.page_table.item(row, PAGE_COL_POST_STATUS)
+        if item is None:
+            item = QtWidgets.QTableWidgetItem("")
+            self.page_table.setItem(row, PAGE_COL_POST_STATUS, item)
+        item.setText(str(status or ""))
+        item.setForeground(QtGui.QColor(foreground))
+        if background:
+            item.setBackground(QtGui.QColor(background))
+        else:
+            item.setBackground(QtGui.QBrush())
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
+        item.setTextAlignment(QtCore.Qt.AlignCenter)
+        if not key:
+            key = str(item.data(QtCore.Qt.UserRole) or "")
+        item.setData(QtCore.Qt.UserRole, key)
+
+    def _center_config_cell(self, row_idx: int, col_idx: int) -> None:
+        item = self.config_table.item(row_idx, col_idx)
+        if item is not None:
+            item.setTextAlignment(QtCore.Qt.AlignCenter)
+
+    def set_page_post_status(self, page_key: str, status: str) -> None:
+        """Cập nhật trạng thái đăng và vẽ lại ngay ô tương ứng trong bảng page."""
+        self._presenter.page_list.page_post_statuses[page_key] = status
+        key = str(page_key or "")
+        for row in range(self.page_table.rowCount()):
+            item = self.page_table.item(row, PAGE_COL_POST_STATUS)
+            if item is not None and str(item.data(QtCore.Qt.UserRole) or "") == key:
+                self._style_post_status_item(row, status)
+                return
 
     # ── IConfigView interface implementation ──────────────────────
 
@@ -1078,6 +1153,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self._set_table_value(row_idx, CONFIG_STATUS_COL, initial_status)
         self._apply_config_row_color(row_idx, initial_status)
         self._set_table_value(row_idx, CONFIG_LINK_COL, row_data.get("link", ""))
+        self._set_table_value(row_idx, CONFIG_POSTED_AT_COL, row_data.get("posted_at", ""))
         self.config_table.setRowHeight(row_idx, 26)
 
     def _apply_config_row_color(self, row_idx: int, status: str) -> None:
@@ -1091,18 +1167,72 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
                 item.setForeground(QtGui.QColor(foreground))
                 item.setBackground(QtGui.QColor(background))
 
-    def _apply_config_status(self, page_name: str, status: str) -> None:
-        """Cập nhật trạng thái + màu ở luồng chính (được gọi qua signal)."""
-        for row in range(self.config_table.rowCount()):
-            item = self.config_table.item(row, 0)
-            if item and item.text().strip() == page_name:
-                self._set_table_value(row, CONFIG_STATUS_COL, status)
-                self._apply_config_row_color(row, status)
-                return
+    def _apply_config_status(self, page_id: str, page_name: str, status: str) -> None:
+        """Cập nhật trạng thái + màu ở luồng chính (được gọi qua signal).
 
-    def update_config_status(self, page_name: str, status: str) -> None:
+        Ưu tiên khớp theo ``page_id`` vì 2 tài khoản có thể cùng tên page;
+        chỉ khi không có id mới khớp theo tên.
+        """
+        row = self._find_config_row(page_id, page_name)
+        if row < 0:
+            return
+        self._set_table_value(row, CONFIG_STATUS_COL, status)
+        self._apply_config_row_color(row, status)
+        self._sync_page_post_status(row, status)
+        if status == "Thành công" and not self._config_cell_text(row, CONFIG_POSTED_AT_COL):
+            self._set_table_value(row, CONFIG_POSTED_AT_COL, datetime.now().strftime("%H:%M:%S %d/%m/%Y"))
+            self._center_config_cell(row, CONFIG_POSTED_AT_COL)
+
+    def _find_config_row(self, page_id: str, page_name: str) -> int:
+        """Tìm dòng hàng đợi theo page_id, fallback theo tên page."""
+        target_id = str(page_id or "").strip()
+        name = str(page_name or "").strip()
+        for row in range(self.config_table.rowCount()):
+            item = self.config_table.item(row, CONFIG_PAGE_COL)
+            if item is None:
+                continue
+            if target_id and str(item.data(QtCore.Qt.UserRole) or "").strip() == target_id:
+                return row
+        if not name:
+            return -1
+        for row in range(self.config_table.rowCount()):
+            item = self.config_table.item(row, CONFIG_PAGE_COL)
+            if item is not None and item.text().strip() == name:
+                return row
+        return -1
+
+    def _apply_config_status_by_id(self, page_id: str, status: str) -> None:
+        """Cập nhật trạng thái cho đúng 1 dòng, xác định bằng page_id."""
+        self._apply_config_status(page_id, "", status)
+
+    def _sync_page_post_status(self, config_row: int, status: str) -> None:
+        """Đồng bộ trạng thái đăng từ hàng đợi sang bảng danh sách page."""
+        page_item = self.config_table.item(config_row, CONFIG_PAGE_COL)
+        if page_item is None:
+            return
+        page_id = str(page_item.data(QtCore.Qt.UserRole) or "")
+        name = page_item.text().strip()
+        if not page_id and not name:
+            return
+        updated = self._presenter.page_list.set_post_status_for_page(page_id, name, status)
+        if not updated:
+            return
+        for row in range(self.page_table.rowCount()):
+            check_item = self.page_table.item(row, PAGE_COL_SELECT)
+            if check_item is None:
+                continue
+            key = str(check_item.data(QtCore.Qt.UserRole) or "")
+            page = self._presenter.page_list.get_page_by_key(key)
+            if page is None:
+                continue
+            if (page_id and str(page.get("id", "")) == page_id) or (
+                not page_id and str(page.get("name", "")).strip() == name
+            ):
+                self._style_post_status_item(row, status, key)
+
+    def update_config_status(self, page_name: str, status: str, page_id: str = "") -> None:
         # Phát signal để tô màu ở luồng chính (an toàn khi đăng đồng thời).
-        self.config_status_changed.emit(page_name, status)
+        self.config_status_changed.emit(str(page_id or ""), str(page_name or ""), str(status or ""))
 
     def update_config_link(self, page_name: str, link: str) -> None:
         """Được gọi từ luồng đăng -> phát signal để cập nhật ở luồng chính."""
@@ -1142,6 +1272,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
                 "post_type": values[CONFIG_POST_TYPE_COL],
                 "schedule_time": values[CONFIG_SCHEDULE_COL],
                 "status": values[CONFIG_STATUS_COL], "link": values[CONFIG_LINK_COL],
+                "posted_at": values[CONFIG_POSTED_AT_COL],
             })
         return rows
 

@@ -129,7 +129,7 @@ class ConfigPresenter:
                 # Không âm thầm bỏ qua: ghi rõ lý do để người dùng biết vì sao
                 # page này không được đăng.
                 skipped.append(page_name)
-                self._view.update_config_status(page_name, "Hết video mới")
+                self._view.update_config_status(page_name, "Hết video mới", row.get("page_id", ""))
                 continue
             posting_rows.append({
                 "row_index": index,
@@ -168,7 +168,7 @@ class ConfigPresenter:
                 concurrency_threads=concurrency_threads,
                 concurrency_delay=concurrency_delay,
                 on_status=self._on_post_status,
-                on_config_status=lambda name, s: self._view.update_config_status(name, s),
+                on_config_status=lambda name, s, pid="": self._view.update_config_status(name, s, pid),
                 on_link=on_link,
                 on_complete=on_complete,
             )
