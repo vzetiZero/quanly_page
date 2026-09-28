@@ -1,4 +1,5 @@
 import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -26,6 +27,11 @@ from views.license_dialog import TrialLicenseDialog
 from views.stats_tab import StatsTab
 
 CONFIG_HEADERS = ["Page", "Tiêu đề", "Mô tả", "Đường dẫn video", "Comment", "Đường dẫn ảnh comment", "Loại đăng", "Thời gian đăng", "Trạng thái", "Link"]
+CONFIG_PAGE_COL = 0
+CONFIG_TITLE_COL = 1
+CONFIG_DESCRIPTION_COL = 2
+CONFIG_VIDEO_COL = 3
+CONFIG_COMMENT_COL = 4
 CONFIG_STATUS_COL = 8
 CONFIG_LINK_COL = 9
 CONFIG_COMMENT_IMAGE_COL = 5
@@ -62,6 +68,7 @@ CONFIG_STATUS_STYLES = {
 
 class FacebookPageManagerWindow(QtWidgets.QMainWindow):
     config_status_changed = QtCore.pyqtSignal(str, str)
+    config_link_changed = QtCore.pyqtSignal(str, str)
 
     def __init__(self, container: Any) -> None:
         super().__init__()
@@ -75,8 +82,11 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.trial_status_label = QtWidgets.QLabel("Trial: đang kiểm tra...")
         self.trial_status_label.setStyleSheet("background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 10px; color: #334155; font-weight: 800;")
 
+        self._last_applied_comment = ""
+
         self._build_ui()
         self.config_status_changed.connect(self._apply_config_status)
+        self.config_link_changed.connect(self._apply_config_link)
 
     def set_presenter(self, presenter: Any) -> None:
         self._presenter = presenter
@@ -326,6 +336,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.config_table.verticalHeader().setVisible(False)
         self.config_table.setMinimumHeight(160)
         self.config_table.horizontalHeader().setStretchLastSection(True)
+        self.config_table.cellDoubleClicked.connect(self._on_config_cell_double_clicked)
         queue_layout.addWidget(self.config_table)
         return queue_group
 
@@ -422,36 +433,90 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         item = self.config_table.item(row, col)
         return item.text().strip() if item is not None else ""
 
+    def _on_config_cell_double_clicked(self, row: int, col: int) -> None:
+        """Nhấp đôi vào cột Link để mở bài đăng trên trình duyệt."""
+        if col != CONFIG_LINK_COL:
+            return
+        link = self._config_cell_text(row, CONFIG_LINK_COL)
+        if not link:
+            self.show_warning("Chưa có link", "Dòng này chưa đăng thành công nên chưa có link.")
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl(link))
+
+    def _sync_queue_titles(self) -> int:
+        """Đặt cột 'Tiêu đề' theo Nội dung bài đăng.
+
+        - Có "Nội dung bài đăng" -> Tiêu đề = nội dung đó.
+        - Không có -> Tiêu đề = tên file video (fallback).
+        Chỉ ghi đè ô đang trống hoặc đang là tiêu đề tự sinh từ tên video,
+        không đụng tới tiêu đề người dùng tự sửa.
+        """
+        post_content = self.quick_post_content_input.toPlainText().strip()
+        changed = 0
+        for row_idx in range(self.config_table.rowCount()):
+            video_path = self._config_cell_text(row_idx, CONFIG_VIDEO_COL)
+            auto_title = Path(video_path).stem if video_path else ""
+            current = self._config_cell_text(row_idx, CONFIG_TITLE_COL)
+            if post_content:
+                if not current or current == auto_title:
+                    self._set_table_value(row_idx, CONFIG_TITLE_COL, post_content)
+                    changed += 1
+            elif not current and auto_title:
+                self._set_table_value(row_idx, CONFIG_TITLE_COL, auto_title)
+                changed += 1
+        return changed
+
     def _on_apply_quick_content(self) -> None:
+        """Nút 'Áp dụng nội dung vào hàng đợi' (ghi đè có chủ đích).
+
+        - Nội dung bài đăng -> cột **Tiêu đề** (KHÔNG điền Mô tả/Comment).
+        - Nội dung comment -> cột **Comment**; nếu ô này để trống thì các
+          comment do lần áp dụng trước điền sẽ được xoá, còn ô người dùng
+          tự gõ thì giữ nguyên.
+        """
         post_content = self.quick_post_content_input.toPlainText().strip()
         comment_content = self.quick_comment_content_input.toPlainText().strip()
         if not post_content and not comment_content:
             self.show_warning("Thiếu nội dung", "Vui lòng nhập 'Nội dung bài đăng' hoặc 'Nội dung comment'.")
             return
-        if self.config_table.rowCount() == 0:
+        row_count = self.config_table.rowCount()
+        if row_count == 0:
             self.show_warning("Hàng đợi trống", "Chưa có page trong hàng đợi. Hãy chọn page rồi bấm 'Chọn video' trước.")
             return
-        for row_idx in range(self.config_table.rowCount()):
+
+        previous_auto_comment = self._last_applied_comment
+        title_changed = 0
+        comment_changed = 0
+        for row_idx in range(row_count):
             if post_content:
-                self._set_table_value(row_idx, 1, post_content)
-                self._set_table_value(row_idx, 2, post_content)
-            self._set_table_value(row_idx, 4, comment_content or post_content)
-        self.show_status(f"Đã áp dụng nội dung vào {self.config_table.rowCount()} dòng")
+                self._set_table_value(row_idx, CONFIG_TITLE_COL, post_content)
+                title_changed += 1
+            # Comment chỉ nhận đúng nội dung comment; nếu để trống thì xoá
+            # các giá trị do lần áp dụng trước điền vào (không xoá ô tự gõ).
+            current_comment = self._config_cell_text(row_idx, CONFIG_COMMENT_COL)
+            if comment_content:
+                if current_comment != comment_content:
+                    self._set_table_value(row_idx, CONFIG_COMMENT_COL, comment_content)
+                    comment_changed += 1
+            elif previous_auto_comment and current_comment == previous_auto_comment:
+                self._set_table_value(row_idx, CONFIG_COMMENT_COL, "")
+                comment_changed += 1
+
+        self._last_applied_comment = comment_content
+        self.show_status(
+            f"Đã áp dụng vào {row_count} dòng: {title_changed} tiêu đề, {comment_changed} comment"
+        )
 
     def _fill_empty_content_from_quick(self) -> None:
-        """Khi bấm Đăng: tự điền nội dung chung vào các ô còn trống (không ghi đè ô đã có)."""
+        """Khi bấm Đăng: tự điền nội dung chung vào ô còn trống (không ghi đè ô đã có)."""
         post_content = self.quick_post_content_input.toPlainText().strip()
         comment_content = self.quick_comment_content_input.toPlainText().strip()
-        if not post_content and not comment_content:
+        self._sync_queue_titles()
+        if not comment_content:
             return
         for row_idx in range(self.config_table.rowCount()):
-            if post_content:
-                if not self._config_cell_text(row_idx, 1):
-                    self._set_table_value(row_idx, 1, post_content)
-                if not self._config_cell_text(row_idx, 2):
-                    self._set_table_value(row_idx, 2, post_content)
-            if comment_content and not self._config_cell_text(row_idx, 4):
-                self._set_table_value(row_idx, 4, comment_content)
+            if not self._config_cell_text(row_idx, CONFIG_COMMENT_COL):
+                self._set_table_value(row_idx, CONFIG_COMMENT_COL, comment_content)
 
     def _select_video_folder(self) -> None:
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Chọn thư mục video")
@@ -494,6 +559,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
 
         entries = self._container.post_service.plan_video_assignment(pages, selected)
         self._presenter.config.populate_assignment_rows(entries)
+        self._sync_queue_titles()
         self.tabs.setCurrentWidget(self.config_tab)
 
         ready = sum(1 for entry in entries if entry.get("video_path"))
@@ -529,11 +595,11 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
 
         for i, row in enumerate(rows):
             if video_files and i < len(video_files):
-                self._set_table_value(row["row_idx"], 3, video_files[i])
-                title = Path(video_files[i]).stem
-                self._set_table_value(row["row_idx"], 1, title)
+                self._set_table_value(row["row_idx"], CONFIG_VIDEO_COL, video_files[i])
             if comment_files and i < len(comment_files):
-                self._set_table_value(row["row_idx"], 5, comment_files[i])
+                self._set_table_value(row["row_idx"], CONFIG_COMMENT_IMAGE_COL, comment_files[i])
+        # Tiêu đề lấy từ Nội dung bài đăng, thiếu thì mới lấy tên file video.
+        self._sync_queue_titles()
 
     def _on_post_from_config(self) -> None:
         self._fill_empty_content_from_quick()
@@ -545,6 +611,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
             concurrency_threads=self.settings_tab.concurrent_threads_spin.value(),
             concurrency_delay=self.settings_tab.concurrent_delay_spin.value(),
             on_complete=self._on_posting_complete,
+            on_link=self.update_config_link,
         )
 
     def _on_posting_complete(self, success: int, fail: int) -> None:
@@ -717,6 +784,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
 
         entries = self._container.post_service.plan_video_assignment(pages, selected)
         added, updated, skipped = self._presenter.config.append_assignment_rows(entries)
+        self._sync_queue_titles()
         self.show_status(
             f"Đã chia video cho {len(pages)} page: thêm {added}, cập nhật {updated}, bỏ qua {skipped}"
         )
@@ -1009,13 +1077,22 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         # Phát signal để tô màu ở luồng chính (an toàn khi đăng đồng thời).
         self.config_status_changed.emit(page_name, status)
 
-    def update_config_link(self, row_idx: int, link: str) -> None:
-        if 0 <= row_idx < self.config_table.rowCount():
-            item = self.config_table.item(row_idx, CONFIG_LINK_COL)
-            if item is None:
-                item = QtWidgets.QTableWidgetItem("")
-                self.config_table.setItem(row_idx, CONFIG_LINK_COL, item)
-            item.setText(str(link or ""))
+    def update_config_link(self, page_name: str, link: str) -> None:
+        """Được gọi từ luồng đăng -> phát signal để cập nhật ở luồng chính."""
+        self.config_link_changed.emit(str(page_name or ""), str(link or ""))
+
+    def _apply_config_link(self, page_name: str, link: str) -> None:
+        if not link:
+            return
+        for row in range(self.config_table.rowCount()):
+            item = self.config_table.item(row, CONFIG_PAGE_COL)
+            if item is not None and item.text().strip() == page_name:
+                self._set_table_value(row, CONFIG_LINK_COL, link)
+                link_item = self.config_table.item(row, CONFIG_LINK_COL)
+                link_item.setToolTip(link)
+                link_item.setForeground(QtGui.QColor("#1d4ed8"))
+                link_item.setTextAlignment(QtCore.Qt.AlignCenter)
+                return
 
     def get_config_rows(self) -> List[Dict[str, str]]:
         rows: List[Dict[str, str]] = []

@@ -383,7 +383,8 @@ class PostService:
         concurrency_delay: float,
         on_status: Callable,
         on_config_status: Callable,
-        on_complete: Callable,
+        on_link: Optional[Callable] = None,
+        on_complete: Callable = None,
     ) -> None:
         success_count = 0
         fail_count = 0
@@ -442,6 +443,8 @@ class PostService:
 
                 on_config_status(page_name, "Thành công")
                 on_status(page_name, "Thành công", "Đăng thành công")
+                if on_link and permalink:
+                    on_link(page_name, permalink)
 
                 self._post_repo.record_page_video(page_name, page_name, video_path, str(post_id or ""), permalink)
                 self._post_repo.log_successful_post(page_name, f"{title}\n\n{description}".strip(), "video")
@@ -478,7 +481,8 @@ class PostService:
                 for entry in batch:
                     worker(entry)
 
-        on_complete(success_count, fail_count)
+        if on_complete:
+            on_complete(success_count, fail_count)
 
     @staticmethod
     def normalize_post_type(post_type: Optional[str]) -> str:

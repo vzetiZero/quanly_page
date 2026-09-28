@@ -108,6 +108,7 @@ class ConfigPresenter:
         concurrency_threads: int,
         concurrency_delay: float,
         on_complete: Callable,
+        on_link: Optional[Callable] = None,
     ) -> None:
         self._view.set_post_config_button_enabled(False)
         self._view.set_post_config_button_text("Đang đăng...")
@@ -151,23 +152,11 @@ class ConfigPresenter:
                 concurrency_delay=concurrency_delay,
                 on_status=lambda name, s, d: self._view.update_config_status(name, s),
                 on_config_status=lambda name, s: self._view.update_config_status(name, s),
+                on_link=on_link,
                 on_complete=on_complete,
             )
 
         threading.Thread(target=worker, daemon=True).start()
-
-    def apply_quick_content(self, post_content: str, comment_content: str) -> None:
-        if not post_content and not comment_content:
-            return
-        rows = self._view.get_config_rows()
-        for row in rows:
-            if post_content:
-                row["title"] = post_content
-                row["description"] = post_content
-            if comment_content:
-                row["comment"] = comment_content
-            else:
-                row["comment"] = post_content
 
     def set_post_type_for_all_rows(self, post_type: str) -> None:
         rows = self._view.get_config_rows()
