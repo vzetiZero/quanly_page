@@ -128,6 +128,29 @@ class QueueContentTest(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(self._cell(1, CONFIG_LINK_COL), "")
 
+    # ── 8b. Link phải ghi đúng dòng khi 2 page trùng tên ──
+    def test_link_matched_by_page_id_not_name(self):
+        window2 = FacebookPageManagerWindow(self.window._container)
+        presenter2 = MainPresenter(window2._container, window2)
+        window2.set_presenter(presenter2)
+        presenter2.config.populate_assignment_rows([
+            {"page_id": "111", "page_name": "Ha", "video_path": r"C:\v\a.mp4", "title": "T1",
+             "description": "", "comment": "", "comment_images": "", "post_type": "video",
+             "schedule_time": "", "status": "Chờ đăng"},
+            {"page_id": "222", "page_name": "Ha", "video_path": r"C:\v\b.mp4", "title": "T2",
+             "description": "", "comment": "", "comment_images": "", "post_type": "video",
+             "schedule_time": "", "status": "Chờ đăng"},
+        ])
+        window2.update_config_link("Ha", "https://www.facebook.com/reel/222", "222")
+        self.app.processEvents()
+
+        self.assertEqual(window2.config_table.item(0, CONFIG_LINK_COL).text(), "")
+        self.assertEqual(
+            window2.config_table.item(1, CONFIG_LINK_COL).text(),
+            "https://www.facebook.com/reel/222",
+        )
+        window2.close()
+
     # ── 9. Hàng đợi trống -> cảnh báo, không crash ──
     def test_apply_on_empty_queue_warns(self):
         warned = []

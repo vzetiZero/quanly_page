@@ -302,8 +302,8 @@ class ScheduleService:
     def _on_config_status(self, page_name: str, status: str, page_id: str = "") -> None:
         self._emit("status", page_id=str(page_id or ""), page_name=str(page_name or ""), status=str(status or ""))
 
-    def _on_link(self, page_name: str, link: str) -> None:
-        self._emit("link", page_name=str(page_name or ""), link=str(link or ""))
+    def _on_link(self, page_name: str, link: str, page_id: str = "") -> None:
+        self._emit("link", page_name=str(page_name or ""), page_id=str(page_id or ""), link=str(link or ""))
 
     def _emit(self, kind: str, **payload: Any) -> None:
         if not callable(self._on_event):

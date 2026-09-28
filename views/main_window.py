@@ -89,7 +89,7 @@ PAGE_POST_STATUS_STYLES = {
 
 class FacebookPageManagerWindow(QtWidgets.QMainWindow):
     config_status_changed = QtCore.pyqtSignal(str, str, str)
-    config_link_changed = QtCore.pyqtSignal(str, str)
+    config_link_changed = QtCore.pyqtSignal(str, str, str)
 
     def __init__(self, container: Any) -> None:
         super().__init__()
@@ -1375,22 +1375,21 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         # Phát signal để tô màu ở luồng chính (an toàn khi đăng đồng thời).
         self.config_status_changed.emit(str(page_id or ""), str(page_name or ""), str(status or ""))
 
-    def update_config_link(self, page_name: str, link: str) -> None:
+    def update_config_link(self, page_name: str, link: str, page_id: str = "") -> None:
         """Được gọi từ luồng đăng -> phát signal để cập nhật ở luồng chính."""
-        self.config_link_changed.emit(str(page_name or ""), str(link or ""))
+        self.config_link_changed.emit(str(page_id or ""), str(page_name or ""), str(link or ""))
 
-    def _apply_config_link(self, page_name: str, link: str) -> None:
+    def _apply_config_link(self, page_id: str, page_name: str, link: str) -> None:
         if not link:
             return
-        for row in range(self.config_table.rowCount()):
-            item = self.config_table.item(row, CONFIG_PAGE_COL)
-            if item is not None and item.text().strip() == page_name:
-                self._set_table_value(row, CONFIG_LINK_COL, link)
-                link_item = self.config_table.item(row, CONFIG_LINK_COL)
-                link_item.setToolTip(link)
-                link_item.setForeground(QtGui.QColor("#1d4ed8"))
-                link_item.setTextAlignment(QtCore.Qt.AlignCenter)
-                return
+        row = self._find_config_row(page_id, page_name)
+        if row < 0:
+            return
+        self._set_table_value(row, CONFIG_LINK_COL, link)
+        link_item = self.config_table.item(row, CONFIG_LINK_COL)
+        link_item.setToolTip(link)
+        link_item.setForeground(QtGui.QColor("#1d4ed8"))
+        link_item.setTextAlignment(QtCore.Qt.AlignCenter)
 
     def get_config_rows(self) -> List[Dict[str, str]]:
         rows: List[Dict[str, str]] = []

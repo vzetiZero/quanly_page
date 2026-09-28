@@ -544,7 +544,7 @@ class PostService:
                 on_config_status(page_name, "Thành công", page_id)
                 on_status(page_name, "Thành công", "Đăng thành công")
                 if on_link and permalink:
-                    on_link(page_name, permalink)
+                    on_link(page_name, permalink, page_id)
 
                 self._post_repo.record_page_video(page_name, page_name, video_path, str(post_id or ""), permalink)
                 self._post_repo.log_successful_post(page_name, f"{title}\n\n{description}".strip(), "video")

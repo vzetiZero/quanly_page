@@ -188,7 +188,11 @@ class SchedulePresenter:
                 str(event.get("page_id") or ""),
             )
         elif kind == "link":
-            self._view.update_config_link(str(event.get("page_name") or ""), str(event.get("link") or ""))
+            self._view.update_config_link(
+                str(event.get("page_name") or ""),
+                str(event.get("link") or ""),
+                str(event.get("page_id") or ""),
+            )
         elif kind == "dispatched":
             self._main_view.log(f"Lịch đăng: bắt đầu {event.get('count', 0)} video đã tới giờ")
         elif kind == "done":
