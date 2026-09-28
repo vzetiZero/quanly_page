@@ -4,7 +4,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from views.widgets import apply_small_button_style
 
-STATS_HEADERS = ["Page", "Video đã đăng", "View video", "Followers", "Fan count", "Cập nhật lúc"]
+STATS_HEADERS = ["Page", "Video trên page", "Video đã đăng (app)", "View video", "Followers", "Fan count", "Cập nhật lúc"]
 
 
 class StatsTab(QtWidgets.QWidget):
@@ -29,8 +29,9 @@ class StatsTab(QtWidgets.QWidget):
         layout.setSpacing(6)
 
         desc = QtWidgets.QLabel(
-            "Số video đã đăng lấy từ lịch sử đăng (chính xác, không cần mạng). "
-            "Lượt view / followers / fan lấy từ Facebook (cần quyền read_insights, pages_read_engagement)."
+            "\"Video trên page\" và \"View video\" lấy từ Facebook (số thật trên page). "
+            "\"Video đã đăng (app)\" đếm từ lịch sử đăng trong app. "
+            "Cần quyền read_insights (view) và pages_read_engagement (followers/fan)."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #334155; font-weight: 650;")
@@ -62,8 +63,9 @@ class StatsTab(QtWidgets.QWidget):
         self.table.setColumnWidth(1, 120)
         self.table.setColumnWidth(2, 140)
         self.table.setColumnWidth(3, 120)
-        self.table.setColumnWidth(4, 120)
-        self.table.setColumnWidth(5, 160)
+        self.table.setColumnWidth(4, 110)
+        self.table.setColumnWidth(5, 110)
+        self.table.setColumnWidth(6, 160)
         layout.addWidget(self.table)
 
         self.refresh_all_btn.clicked.connect(lambda: self._on_refresh_all and self._on_refresh_all())
@@ -72,15 +74,16 @@ class StatsTab(QtWidgets.QWidget):
     # ── Data ──────────────────────────────────────────────────────
     @staticmethod
     def _row_values(row: Dict[str, Any]) -> List[str]:
-        views = row.get("video_views")
-        followers = row.get("followers")
-        fan = row.get("fan_count")
+        def fmt(value: Any) -> str:
+            return "N/A" if value is None else f"{int(value):,}"
+
         return [
             str(row.get("page", "")),
-            str(row.get("video_count", 0)),
-            "N/A" if views is None else f"{int(views):,}",
-            "N/A" if followers is None else f"{int(followers):,}",
-            "N/A" if fan is None else f"{int(fan):,}",
+            fmt(row.get("page_video_count")),
+            fmt(row.get("app_video_count")),
+            fmt(row.get("video_views")),
+            fmt(row.get("followers")),
+            fmt(row.get("fan_count")),
             str(row.get("updated_at", "")),
         ]
 

@@ -6,20 +6,26 @@ import requests
 logger = logging.getLogger("facebook_ui")
 
 # Metric lượt xem video ở cấp Page (cần quyền read_insights).
-PAGE_VIDEO_VIEW_METRICS = ["page_video_views", "page_video_views_organic", "page_post_engagements"]
-# Metric ở cấp từng video (dự phòng).
+PAGE_VIDEO_VIEW_METRICS = ["page_video_views", "page_video_views_organic"]
+# Metric ở cấp từng video (dự phòng, cho tổng view trọn đời).
 VIDEO_INSIGHT_METRICS = ["total_video_views", "post_video_views", "video_views"]
+# Số video tối đa lấy về để đếm + cộng view (tránh chạy quá lâu).
+MAX_VIDEOS = 200
 
 
 class StatsService:
-    """Thống kê số video đã đăng và lượt xem theo từng page."""
+    """Thống kê số video và lượt xem theo từng page.
+
+    - Video trên page + View video: lấy từ Facebook (số thật trên page).
+    - Video đã đăng (app): đếm từ lịch sử đăng trong app.
+    """
 
     def __init__(self, stats_repo: Any, base_url: str = "", timeout: int = 20) -> None:
         self._repo = stats_repo
         self._base_url = (base_url or "https://graph.facebook.com/v25.0").rstrip("/")
         self._timeout = timeout
 
-    # ── Local (luôn chính xác, không cần mạng) ────────────────────
+    # ── Local (không cần mạng) ────────────────────────────────────
     def local_video_counts(self) -> Dict[str, int]:
         return self._repo.count_posted_videos_by_page()
 
@@ -36,7 +42,8 @@ class StatsService:
             rows.append({
                 "page": page.get("name") or key,
                 "page_key": key,
-                "video_count": counts.get(key, 0),
+                "page_video_count": stat.get("video_count"),
+                "app_video_count": counts.get(key, 0),
                 "video_views": stat.get("video_views"),
                 "followers": stat.get("followers_count"),
                 "fan_count": stat.get("fan_count"),
@@ -44,7 +51,7 @@ class StatsService:
             })
         return rows
 
-    # ── Facebook (best-effort) ────────────────────────────────────
+    # ── HTTP ──────────────────────────────────────────────────────
     def _get(self, path: str, params: Dict[str, Any]) -> Any:
         try:
             response = requests.get(f"{self._base_url}{path}", params=params, timeout=self._timeout)
@@ -70,35 +77,40 @@ class StatsService:
                     found = True
         return total if found else None
 
-    def _page_video_views(self, page_id: str, token: str) -> Optional[int]:
-        payload, error = self._get(
-            f"/{page_id}/insights",
-            {"access_token": token, "metric": ",".join(PAGE_VIDEO_VIEW_METRICS), "period": "day"},
-        )
-        if error is None:
-            total = self._sum_insight_values(payload)
-            if total is not None:
-                return total
-        for metric in PAGE_VIDEO_VIEW_METRICS:
-            payload, error = self._get(
-                f"/{page_id}/insights",
-                {"access_token": token, "metric": metric, "period": "day"},
-            )
-            if error is None:
-                total = self._sum_insight_values(payload)
-                if total is not None:
-                    return total
-        return None
+    # ── Facebook ──────────────────────────────────────────────────
+    def _page_counts(self, page_id: str, token: str) -> Dict[str, Optional[int]]:
+        payload, error = self._get(f"/{page_id}", {"access_token": token, "fields": "followers_count,fan_count"})
+        if error is not None or not isinstance(payload, dict):
+            return {"followers_count": None, "fan_count": None}
+        return {"followers_count": payload.get("followers_count"), "fan_count": payload.get("fan_count")}
 
-    def _sum_video_views(self, token: str, posted_ids: List[str]) -> Optional[int]:
+    def _page_videos(self, page_id: str, token: str, max_videos: int = MAX_VIDEOS) -> List[str]:
+        """Danh sách id video thật trên page (phân trang)."""
+        ids: List[str] = []
+        after = None
+        while len(ids) < max_videos:
+            params: Dict[str, Any] = {"access_token": token, "fields": "id", "limit": 100}
+            if after:
+                params["after"] = after
+            payload, error = self._get(f"/{page_id}/videos", params)
+            if error is not None or not isinstance(payload, dict):
+                logger.info("Không lấy được video của page %s: %s", page_id, error)
+                break
+            data = payload.get("data", []) or []
+            for item in data:
+                if isinstance(item, dict) and item.get("id"):
+                    ids.append(str(item["id"]))
+            after = (payload.get("paging", {}) or {}).get("cursors", {}).get("after")
+            if not data or not after:
+                break
+        return ids[:max_videos]
+
+    def _sum_video_views(self, token: str, video_ids: List[str]) -> Optional[int]:
         total = 0
         found = False
-        for video_id in posted_ids:
+        for video_id in video_ids:
             for metric in VIDEO_INSIGHT_METRICS:
-                payload, error = self._get(
-                    f"/{video_id}/video_insights",
-                    {"access_token": token, "metric": metric},
-                )
+                payload, error = self._get(f"/{video_id}/video_insights", {"access_token": token, "metric": metric})
                 if error is None:
                     value = self._sum_insight_values(payload)
                     if value is not None:
@@ -107,20 +119,35 @@ class StatsService:
                         break
         return total if found else None
 
-    def _page_counts(self, page_id: str, token: str) -> Dict[str, Optional[int]]:
-        payload, error = self._get(
-            f"/{page_id}",
-            {"access_token": token, "fields": "followers_count,fan_count"},
-        )
-        if error is not None or not isinstance(payload, dict):
-            return {"followers_count": None, "fan_count": None}
-        return {
-            "followers_count": payload.get("followers_count"),
-            "fan_count": payload.get("fan_count"),
-        }
+    def _page_video_views(self, page_id: str, token: str) -> Optional[int]:
+        """Dự phòng: tổng view video ở cấp Page, thử nhiều khoảng thời gian."""
+        attempts = [
+            {"period": "day", "date_preset": "last_month"},
+            {"period": "day", "date_preset": "last_90d"},
+            {"period": "day", "date_preset": "maximum"},
+            {"period": "day"},
+        ]
+        for extra in attempts:
+            params = {"access_token": token, "metric": ",".join(PAGE_VIDEO_VIEW_METRICS)}
+            params.update(extra)
+            payload, error = self._get(f"/{page_id}/insights", params)
+            if error is None:
+                total = self._sum_insight_values(payload)
+                if total is not None:
+                    return total
+        for metric in PAGE_VIDEO_VIEW_METRICS:
+            payload, error = self._get(
+                f"/{page_id}/insights",
+                {"access_token": token, "metric": metric, "period": "day", "date_preset": "last_month"},
+            )
+            if error is None:
+                total = self._sum_insight_values(payload)
+                if total is not None:
+                    return total
+        return None
 
     def refresh(self, pages: List[Dict[str, Any]], on_page: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[Dict[str, Any]]:
-        counts = self.local_video_counts()
+        app_counts = self.local_video_counts()
         rows: List[Dict[str, Any]] = []
         for page in pages or []:
             page_id = str(page.get("id") or "")
@@ -128,29 +155,35 @@ class StatsService:
             page_key = str(page_name)
             token = page.get("access_token") or ""
 
-            video_count = counts.get(page_key, 0)
-            followers_count = None
-            fan_count = None
-            video_views = None
+            app_video_count = app_counts.get(page_key, 0)
+            page_video_count: Optional[int] = None
+            video_views: Optional[int] = None
+            followers: Optional[int] = None
+            fan_count: Optional[int] = None
 
             if token and page_id:
-                page_counts = self._page_counts(page_id, token)
-                followers_count = page_counts.get("followers_count")
-                fan_count = page_counts.get("fan_count")
-                video_views = self._page_video_views(page_id, token)
-                if video_views is None:
-                    posted_ids = [item.get("post_id") for item in self._repo.load_posted_video_ids(page_key)]
-                    posted_ids = [pid for pid in posted_ids if pid]
-                    if posted_ids:
-                        video_views = self._sum_video_views(token, posted_ids)
+                counts = self._page_counts(page_id, token)
+                followers = counts.get("followers_count")
+                fan_count = counts.get("fan_count")
 
-            self._repo.save_page_stats(page_key, page_name, video_count, video_views, followers_count, fan_count)
+                video_ids = self._page_videos(page_id, token)
+                if video_ids:
+                    page_video_count = len(video_ids)
+                    video_views = self._sum_video_views(token, video_ids)
+                if video_views is None:
+                    video_views = self._page_video_views(page_id, token)
+
+            self._repo.save_page_stats(
+                page_key, page_name,
+                page_video_count or 0, video_views, followers, fan_count,
+            )
             row = {
                 "page": page_name,
                 "page_key": page_key,
-                "video_count": video_count,
+                "page_video_count": page_video_count,
+                "app_video_count": app_video_count,
                 "video_views": video_views,
-                "followers": followers_count,
+                "followers": followers,
                 "fan_count": fan_count,
                 "updated_at": "",
             }

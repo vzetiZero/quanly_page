@@ -34,13 +34,19 @@ class FakeRepo:
 
 
 PAGE_INSIGHTS_OK = True
+VIDEO_INSIGHTS_OK = True
+VIDEOS = [{"id": "v1"}, {"id": "v2"}, {"id": "v3"}]
 
 
 def fake_get(url, params=None, timeout=None):
     params = params or {}
     metric = str(params.get("metric", ""))
+    if url.endswith("/videos"):
+        return FakeResponse(200, {"data": VIDEOS, "paging": {"cursors": {}}})
     if "/video_insights" in url:
-        return FakeResponse(200, {"data": [{"name": "total_video_views", "values": [{"value": 20}]}]})
+        if VIDEO_INSIGHTS_OK:
+            return FakeResponse(200, {"data": [{"name": "total_video_views", "values": [{"value": 20}]}]})
+        return FakeResponse(400, {"error": {"message": "no video insight"}})
     if url.endswith("/insights"):
         if "page_video_views" in metric and PAGE_INSIGHTS_OK:
             return FakeResponse(200, {"data": [{"name": "page_video_views", "values": [{"value": 50}]}]})
@@ -50,37 +56,38 @@ def fake_get(url, params=None, timeout=None):
 
 class TestStatsService(unittest.TestCase):
     def setUp(self):
-        global PAGE_INSIGHTS_OK
+        global PAGE_INSIGHTS_OK, VIDEO_INSIGHTS_OK
         PAGE_INSIGHTS_OK = True
+        VIDEO_INSIGHTS_OK = True
 
-    def test_refresh_uses_page_video_views(self):
-        repo = FakeRepo()
-        service = StatsService(stats_repo=repo, base_url="https://graph.facebook.com/v25.0")
+    def _service(self):
+        return StatsService(stats_repo=FakeRepo(), base_url="https://graph.facebook.com/v25.0")
+
+    def test_refresh_counts_page_videos_and_views(self):
+        service = self._service()
         page = {"id": "1", "name": "Page A", "access_token": "tok"}
         with mock.patch("services.stats_service.requests.get", side_effect=fake_get):
             rows = service.refresh([page])
-        self.assertEqual(rows[0]["video_count"], 3)
-        self.assertEqual(rows[0]["video_views"], 50)
+        self.assertEqual(rows[0]["page_video_count"], 3)
+        self.assertEqual(rows[0]["app_video_count"], 3)
+        self.assertEqual(rows[0]["video_views"], 60)  # 3 video x 20 views
         self.assertEqual(rows[0]["followers"], 100)
         self.assertEqual(rows[0]["fan_count"], 90)
-        self.assertEqual(repo.saved[0]["video_views"], 50)
+        self.assertEqual(service._repo.saved[0]["video_count"], 3)
 
-    def test_refresh_falls_back_to_video_insights(self):
-        global PAGE_INSIGHTS_OK
-        PAGE_INSIGHTS_OK = False
-        repo = FakeRepo()
-        service = StatsService(stats_repo=repo, base_url="https://graph.facebook.com/v25.0")
+    def test_refresh_falls_back_to_page_insights(self):
+        global VIDEO_INSIGHTS_OK
+        VIDEO_INSIGHTS_OK = False
+        service = self._service()
         page = {"id": "1", "name": "Page A", "access_token": "tok"}
         with mock.patch("services.stats_service.requests.get", side_effect=fake_get):
             rows = service.refresh([page])
-        # 2 video x 20 views = 40
-        self.assertEqual(rows[0]["video_views"], 40)
+        self.assertEqual(rows[0]["video_views"], 50)
 
     def test_local_rows_without_network(self):
-        repo = FakeRepo()
-        service = StatsService(stats_repo=repo, base_url="https://graph.facebook.com/v25.0")
+        service = self._service()
         rows = service.local_rows([{"id": "1", "name": "Page A"}])
-        self.assertEqual(rows[0]["video_count"], 3)
+        self.assertEqual(rows[0]["app_video_count"], 3)
         self.assertIsNone(rows[0]["video_views"])
 
 
