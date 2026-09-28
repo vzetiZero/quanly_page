@@ -35,7 +35,13 @@ CACHE_DIR=./.cache
 ```bash
 python main.py verify-token
 ```
-Lệnh này sẽ kiểm tra token, quyền `pages_show_list`, `business_management`, `pages_manage_posts` và `publish_video`, rồi lưu kết quả vào output/token_verification.json.
+Lệnh này sẽ kiểm tra token và các quyền cần thiết, rồi lưu kết quả vào `output/token_verification.json` (kèm danh sách quyền còn thiếu).
+
+## Quyền cần cấp cho Meta App / token
+`read_insights`, `pages_show_list`, `business_management`, `pages_read_engagement`,
+`pages_manage_metadata`, `pages_read_user_content`, `pages_manage_posts`, `pages_manage_engagement`.
+
+Trong app: tab **Cài đặt chung** → **Kiểm tra quyền** để xem token đã đủ quyền hay còn thiếu quyền nào.
 
 ## Thu thập danh sách Pages
 ```bash

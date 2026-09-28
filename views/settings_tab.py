@@ -34,6 +34,10 @@ class SettingsTab(QtWidgets.QWidget):
         apply_small_button_style(self.check_tokens_btn)
         actions.addWidget(self.check_tokens_btn)
 
+        self.check_permissions_btn = QtWidgets.QPushButton("Kiểm tra quyền")
+        apply_small_button_style(self.check_permissions_btn)
+        actions.addWidget(self.check_permissions_btn)
+
         self.activate_trial_btn = QtWidgets.QPushButton("Kích hoạt mã")
         apply_small_button_style(self.activate_trial_btn)
         actions.addWidget(self.activate_trial_btn)

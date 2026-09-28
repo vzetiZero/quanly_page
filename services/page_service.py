@@ -8,6 +8,28 @@ from di.interfaces import IPageRepository, ITokenRepository
 
 logger = logging.getLogger("facebook_ui")
 
+# Quyền cần cấp cho Meta App / token để app hoạt động đầy đủ.
+REQUIRED_PERMISSIONS = [
+    "pages_show_list",
+    "business_management",
+    "pages_read_engagement",
+    "pages_manage_metadata",
+    "pages_read_user_content",
+    "pages_manage_posts",
+    "pages_manage_engagement",
+    "read_insights",
+]
+PERMISSION_LABELS = {
+    "pages_show_list": "Xem danh sách Page",
+    "business_management": "Quản lý Business Manager",
+    "pages_read_engagement": "Đọc tương tác Page (followers, fan_count…)",
+    "pages_manage_metadata": "Quản lý metadata Page",
+    "pages_read_user_content": "Đọc nội dung người dùng (comment…)",
+    "pages_manage_posts": "Đăng bài / video lên Page",
+    "pages_manage_engagement": "Quản lý comment / tương tác",
+    "read_insights": "Đọc insights (lượt xem, hiển thị)",
+}
+
 
 def _fetch_paginated_graph_data(
     session: requests.Session,
@@ -73,6 +95,37 @@ class PageService:
             return {"valid": False, "error": "Không thể xác thực token", "expires_at": None, "account_id": None, "account_name": None}
         except Exception as exc:
             return {"valid": False, "error": str(exc), "expires_at": None, "account_id": None, "account_name": None}
+
+    def check_permissions(self, token: str) -> Dict[str, Any]:
+        """Kiểm tra token đã được cấp những quyền nào trong REQUIRED_PERMISSIONS."""
+        try:
+            response = requests.get(
+                f"{self._base_url}/me/permissions",
+                params={"access_token": token},
+                timeout=25,
+            )
+            payload = response.json()
+        except Exception as exc:
+            return {
+                "ok": False, "error": str(exc),
+                "granted": [], "missing": list(REQUIRED_PERMISSIONS),
+            }
+
+        if response.status_code >= 400:
+            message = payload.get("error", {}).get("message", "Không đọc được quyền của token")
+            return {
+                "ok": False, "error": message,
+                "granted": [], "missing": list(REQUIRED_PERMISSIONS),
+            }
+
+        granted = sorted({
+            item.get("permission")
+            for item in payload.get("data", [])
+            if isinstance(item, dict) and item.get("status") == "granted" and item.get("permission")
+        })
+        granted_set = set(granted)
+        missing = [p for p in REQUIRED_PERMISSIONS if p not in granted_set]
+        return {"ok": True, "error": "", "granted": granted, "missing": missing}
 
     def fetch_pages(self, token: str) -> List[Dict[str, Any]]:
         session = requests.Session()

@@ -260,26 +260,29 @@ class FacebookPageScraper:
             result["errors"].append({"operation": "me/accounts", "error": str(exc)})
 
         permissions_data = result.get("permissions", {})
-        result["summary"] = {
+        required_permissions = [
+            "pages_show_list",
+            "business_management",
+            "pages_read_engagement",
+            "pages_manage_metadata",
+            "pages_read_user_content",
+            "pages_manage_posts",
+            "pages_manage_engagement",
+            "read_insights",
+        ]
+        granted = {
+            perm.get("permission")
+            for perm in permissions_data.get("data", [])
+            if perm.get("status") == "granted"
+        }
+        summary: Dict[str, Any] = {
             "business_count": len(result.get("businesses", [])),
             "page_count_from_accounts": len(result.get("account_pages", [])),
-            "has_pages_show_list": any(
-                perm.get("permission") == "pages_show_list" and perm.get("status") == "granted"
-                for perm in permissions_data.get("data", [])
-            ),
-            "has_business_management": any(
-                perm.get("permission") == "business_management" and perm.get("status") == "granted"
-                for perm in permissions_data.get("data", [])
-            ),
-            "has_pages_manage_posts": any(
-                perm.get("permission") == "pages_manage_posts" and perm.get("status") == "granted"
-                for perm in permissions_data.get("data", [])
-            ),
-            "has_publish_video": any(
-                perm.get("permission") == "publish_video" and perm.get("status") == "granted"
-                for perm in permissions_data.get("data", [])
-            ),
         }
+        for permission in required_permissions:
+            summary[f"has_{permission}"] = permission in granted
+        summary["missing_permissions"] = [p for p in required_permissions if p not in granted]
+        result["summary"] = summary
 
         logger.info("Kiểm tra token hoàn tất")
         return result

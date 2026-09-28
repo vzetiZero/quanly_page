@@ -139,6 +139,11 @@ class PageDetailFetcher:
         result["page_id"] = page_id
         result["page_name"] = page_name or info.get("name") or info.get("page_name") or ""
         result.setdefault("_errors", info.get("_errors", []))
+        if not insights:
+            result["_errors"].append({
+                "field": "insights (lượt xem)",
+                "message": "Thiếu quyền read_insights hoặc metric đã bị Meta bỏ",
+            })
         return result
 
     # ── Parsers ───────────────────────────────────────────────────

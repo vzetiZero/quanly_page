@@ -326,6 +326,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.page_size_combo.currentTextChanged.connect(lambda v: p.page_list.set_page_size(int(v)))
         self.page_search_input.textChanged.connect(p.page_list.filter_pages)
         self.settings_tab.check_tokens_btn.clicked.connect(lambda: p.settings.check_tokens(p.page_list.get_token_input()))
+        self.settings_tab.check_permissions_btn.clicked.connect(self._on_check_permissions)
         self.settings_tab.activate_trial_btn.clicked.connect(self._on_trial_dialog)
         self.settings_tab.refresh_token_btn.clicked.connect(p.on_refresh_tokens)
         self.settings_tab.clear_cache_btn.clicked.connect(p.on_clear_cache)
@@ -354,6 +355,34 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
             self._presenter.on_trial_activate(dialog.code)
         else:
             self._presenter._lock_trial_expired()
+
+    def _on_check_permissions(self) -> None:
+        from services.page_service import PERMISSION_LABELS, REQUIRED_PERMISSIONS
+
+        tokens = [t.strip() for t in self.get_token_input().splitlines() if t.strip()]
+        if not tokens:
+            self.show_warning("Thiếu token", "Vui lòng nhập ít nhất 1 access token")
+            return
+
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            results = [(token, self._container.page_service.check_permissions(token)) for token in tokens]
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+        lines = []
+        for token, result in results:
+            prefix = token[:10] + "…"
+            if not result.get("ok"):
+                lines.append(f"• {prefix}: LỖI – {result.get('error')}")
+                continue
+            missing = result.get("missing", [])
+            if missing:
+                labels = ", ".join(f"{PERMISSION_LABELS.get(p, p)} [{p}]" for p in missing)
+                lines.append(f"• {prefix}: thiếu {len(missing)}/{len(REQUIRED_PERMISSIONS)} quyền\n   {labels}")
+            else:
+                lines.append(f"• {prefix}: đủ {len(REQUIRED_PERMISSIONS)}/{len(REQUIRED_PERMISSIONS)} quyền ✔")
+        self.show_info("Kiểm tra quyền token", "\n".join(lines) if lines else "Không có kết quả")
 
     def _on_clear_config(self) -> None:
         self.config_table.setRowCount(0)
