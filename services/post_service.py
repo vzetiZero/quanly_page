@@ -321,9 +321,13 @@ class PostService:
         use_concurrency = concurrency_enabled and len(pages) > 1
         max_workers = concurrency_threads if use_concurrency else 1
 
-        def worker(page: Dict[str, Any]) -> None:
+        def worker(page: Dict[str, Any], start_delay: float = 0.0) -> None:
             nonlocal success_count, fail_count
             page_id = page["id"]
+            if start_delay and start_delay > 0:
+                deadline = time.time() + start_delay
+                while time.time() < deadline and not self.stop_requested:
+                    time.sleep(min(0.25, deadline - time.time()))
             if self.stop_requested:
                 on_status(page_id, "Đã dừng", "Quá trình bị dừng bởi người dùng")
                 return
@@ -336,8 +340,6 @@ class PostService:
                         remaining = (scheduled_time - datetime.now()).total_seconds()
                     if self.stop_requested:
                         return
-            if concurrency_delay > 0:
-                time.sleep(concurrency_delay)
             on_status(page_id, "Đang đăng", "Đang gửi yêu cầu tới Facebook")
             try:
                 if video_paths:
@@ -352,24 +354,28 @@ class PostService:
                 self._post_repo.log_successful_post(page.get("name", page_id), message, media_type)
             except Exception as exc:
                 fail_count += 1
+                logger.error("Đăng thất bại | page=%s | %s", page.get("name", page_id), exc)
                 on_status(page_id, "Thất bại", str(exc))
 
         if use_concurrency:
-            batches = chunked_batches(pages, max_workers)
-        else:
-            batches = [pages]
-
-        for batch_index, batch in enumerate(batches):
-            if batch_index > 0 and concurrency_delay > 0:
-                time.sleep(concurrency_delay)
-            if use_concurrency:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [executor.submit(worker, page) for page in batch]
-                    for future in as_completed(futures):
+            # Một pool chung cho tất cả page (không chia lô nốt tiếp).
+            logger.info(
+                "Bắt đầu đăng đồng thời: %d page / %d luồng / trễ %ss",
+                len(pages), max_workers, concurrency_delay,
+            )
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(worker, page, delay) for page, delay in self._stagger(pages, max_workers, concurrency_delay)]
+                for future in as_completed(futures):
+                    try:
                         future.result()
-            else:
-                for page in batch:
-                    worker(page)
+                    except Exception as exc:
+                        logger.exception("Lỗi ngoài worker khi đăng: %s", exc)
+                        fail_count += 1
+        else:
+            for index, page in enumerate(pages):
+                if index > 0 and concurrency_delay > 0:
+                    time.sleep(concurrency_delay)
+                worker(page, 0)
 
         on_complete(success_count, fail_count)
 
@@ -390,9 +396,25 @@ class PostService:
         fail_count = 0
         use_concurrency = concurrency_enabled and len(rows) > 1
         max_workers = concurrency_threads if use_concurrency else 1
+        # (page_name, lý do) để báo lại cho người dùng biết page nào hỏng vì gì.
+        failure_reasons: List[tuple] = []
+        page_pool = {str(p.get("id") or ""): p for p in pages or [] if p.get("id")}
 
-        def worker(entry: Dict[str, Any]) -> None:
-            nonlocal success_count, fail_count
+        def record_failure(page_name: str, reason: str) -> None:
+            nonlocal fail_count
+            fail_count += 1
+            failure_reasons.append((page_name, reason))
+            logger.error("Đăng thất bại | page=%s | %s", page_name, reason)
+            on_config_status(page_name, "Thất bại")
+            on_status(page_name, "Thất bại", reason)
+
+        def worker(entry: Dict[str, Any], start_delay: float = 0.0) -> None:
+            nonlocal success_count
+            if start_delay and start_delay > 0:
+                # Ngủ theo độ trễ được giao, nhưng vẫn dừng được nếu bấm Dừng.
+                deadline = time.time() + start_delay
+                while time.time() < deadline and not self.stop_requested:
+                    time.sleep(min(0.25, deadline - time.time()))
             if self.stop_requested:
                 return
             page_name = entry["page_name"]
@@ -410,13 +432,16 @@ class PostService:
             on_status(page_name, "Đang đăng", "Đang gửi yêu cầu tới Facebook")
 
             try:
-                matching_page = None
-                for page in pages:
-                    if page.get("name") == page_name or page.get("id") == page_name:
-                        matching_page = page
-                        break
+                if not video_path:
+                    record_failure(page_name, "Dòng này chưa có video, hãy bấm 'Chọn video' để gán video.")
+                    return
+                matching_page = self._match_page(pages, page_name, entry.get("page_id"))
                 if not matching_page:
-                    raise ValueError(f"Không tìm thấy page: {page_name}")
+                    record_failure(page_name, "Không tìm thấy page trong danh sách (tên/id không khớp).")
+                    return
+                if not str(matching_page.get("access_token") or "").strip():
+                    record_failure(page_name, "Thiếu Page Access Token cho page này.")
+                    return
 
                 schedule_time = entry.get("schedule_time")
                 if schedule_time:
@@ -460,29 +485,64 @@ class PostService:
 
                 entry["result"] = {"post_id": post_id, "permalink_url": permalink, "comment_ok": has_comment}
             except Exception as exc:
-                fail_count += 1
-                on_config_status(page_name, "Thất bại")
-                on_status(page_name, "Thất bại", str(exc))
+                record_failure(page_name, str(exc) or exc.__class__.__name__)
 
         if use_concurrency:
-            batches = chunked_batches(rows, max_workers)
-        else:
-            batches = [rows]
-
-        for batch_index, batch in enumerate(batches):
-            if batch_index > 0 and concurrency_delay > 0:
-                time.sleep(concurrency_delay)
-            if use_concurrency:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [executor.submit(worker, entry) for entry in batch]
-                    for future in as_completed(futures):
+            # Một pool duy nhất cho TẤT CẢ page: page thứ 3+ không phải chờ
+            # lô trước xong mới bắt đầu. `concurrency_delay` chỉ là độ trễ
+            # giữa các lần bắt đầu (giãn cách nhẹ), không phải chặn cả lô.
+            logger.info(
+                "Bắt đầu đăng đồng thời: %d page / %d luồng / trễ %ss",
+                len(rows), max_workers, concurrency_delay,
+            )
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(worker, entry, delay) for entry, delay in self._stagger(rows, max_workers, concurrency_delay)]
+                for future in as_completed(futures):
+                    try:
                         future.result()
-            else:
-                for entry in batch:
-                    worker(entry)
+                    except Exception as exc:  # lỗi ngoài worker -> không làm cả lô hỏng
+                        logger.exception("Lỗi ngoài worker khi đăng: %s", exc)
+                        fail_count += 1
+        else:
+            for index, entry in enumerate(rows):
+                if index > 0 and concurrency_delay > 0:
+                    time.sleep(concurrency_delay)
+                worker(entry, 0)
 
         if on_complete:
-            on_complete(success_count, fail_count)
+            on_complete(success_count, fail_count, list(failure_reasons))
+
+    @staticmethod
+    def _stagger(rows: list, max_workers: int, delay: float) -> List[tuple]:
+        """Trả về [(entry, delay_giây)] để các luồng lệch nhau một chút."""
+        if delay <= 0:
+            return [(entry, 0.0) for entry in rows]
+        return [(entry, float(index % max(1, max_workers)) * delay) for index, entry in enumerate(rows)]
+
+    @staticmethod
+    def _match_page(pages: List[Dict[str, Any]], page_name: str, page_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Tìm page theo id trước, sau đó mới theo tên.
+
+        Ưu tiên ``id`` vì 2 tài khoản khác nhau có thể cùng tên page —
+        khớp theo tên sẽ chọn nhầm page (và nhầm luôn access token).
+        """
+        if not pages:
+            return None
+        target_id = str(page_id or "").strip()
+        if target_id:
+            for page in pages:
+                if str(page.get("id") or "").strip() == target_id:
+                    return page
+        target_name = str(page_name or "").strip()
+        if not target_name:
+            return None
+        for page in pages:
+            if str(page.get("name") or "").strip() == target_name:
+                return page
+        for page in pages:
+            if str(page.get("id") or "").strip() == target_name:
+                return page
+        return None
 
     @staticmethod
     def normalize_post_type(post_type: Optional[str]) -> str:

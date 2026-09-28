@@ -614,12 +614,34 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
             on_link=self.update_config_link,
         )
 
-    def _on_posting_complete(self, success: int, fail: int) -> None:
+    def _on_posting_complete(self, success: int, fail: int, failures: Optional[List[tuple]] = None) -> None:
         self.stop_btn.setEnabled(False)
         self.post_config_btn.setEnabled(True)
         self.post_config_btn.setText("Đăng")
         self.status_label.setText(f"Hoàn tất: thành công {success}, thất bại {fail}")
         self._load_local_stats()
+        if failures:
+            # Ghi lý do vào tooltip của ô Trạng thái + log ra màn hình để biết
+            # chính xác page nào hỏng vì gì.
+            lines = []
+            for page_name, reason in failures:
+                text = str(reason or "").strip() or "Lỗi không xác định"
+                lines.append(f"• {page_name}: {text}")
+                self._set_config_status_tooltip(page_name, text)
+                logger.error("Đăng thất bại | page=%s | %s", page_name, text)
+            self.show_warning(
+                f"Đăng xong: {success} thành công, {fail} thất bại",
+                "\n".join(lines),
+            )
+
+    def _set_config_status_tooltip(self, page_name: str, detail: str) -> None:
+        for row in range(self.config_table.rowCount()):
+            item = self.config_table.item(row, CONFIG_PAGE_COL)
+            if item is not None and item.text().strip() == page_name:
+                status_item = self.config_table.item(row, CONFIG_STATUS_COL)
+                if status_item is not None:
+                    status_item.setToolTip(detail)
+                return
 
     def _on_tab_changed(self, index: int) -> None:
         if self.tabs.widget(index) is getattr(self, "stats_tab", None):
@@ -1033,7 +1055,12 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
     def add_config_row(self, row_data: Dict[str, Any]) -> None:
         row_idx = self.config_table.rowCount()
         self.config_table.insertRow(row_idx)
-        self._set_table_value(row_idx, 0, row_data.get("page_name", row_data.get("page", "")))
+        page_name = str(row_data.get("page_name") or row_data.get("page") or "")
+        self._set_table_value(row_idx, 0, page_name)
+        page_item = self.config_table.item(row_idx, 0)
+        if page_item is not None:
+            page_item.setData(QtCore.Qt.UserRole, str(row_data.get("page_id") or ""))
+            page_item.setToolTip(page_name)
         self._set_table_value(row_idx, 1, row_data.get("title", ""))
         self._set_table_value(row_idx, 2, row_data.get("description", ""))
         self._set_table_value(row_idx, 3, row_data.get("video_path", ""))
@@ -1103,8 +1130,13 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
                 values.append(item.text().strip() if item is not None else "")
             if not any(values):
                 continue
+            page_item = self.config_table.item(row_idx, CONFIG_PAGE_COL)
             rows.append({
-                "page": values[0], "title": values[1], "description": values[2],
+                "page": values[0],
+                # page_id lưu ở UserRole để khớp chính xác, tránh nhầm khi
+                # 2 tài khoản cùng quản lý 1 tên page.
+                "page_id": str(page_item.data(QtCore.Qt.UserRole) or "") if page_item is not None else "",
+                "title": values[1], "description": values[2],
                 "video_path": values[3], "comment": values[4],
                 "comment_images": values[CONFIG_COMMENT_IMAGE_COL],
                 "post_type": values[CONFIG_POST_TYPE_COL],

@@ -1,7 +1,10 @@
+import logging
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from di.interfaces import IMainView, IConfigView
+
+logger = logging.getLogger(__name__)
 from services.config_service import ConfigService, VIDEO_EXTENSIONS, IMAGE_EXTENSIONS
 from services.post_service import PostService
 
@@ -116,15 +119,21 @@ class ConfigPresenter:
 
         rows = self._view.get_config_rows()
         posting_rows = []
-        for row in rows:
+        skipped: List[str] = []
+        for index, row in enumerate(rows):
             page_name = row.get("page", "")
             if not page_name:
                 continue
             video_path = row.get("video_path", "")
             if not video_path:
+                # Không âm thầm bỏ qua: ghi rõ lý do để người dùng biết vì sao
+                # page này không được đăng.
+                skipped.append(page_name)
+                self._view.update_config_status(page_name, "Hết video mới")
                 continue
             posting_rows.append({
-                "row_index": rows.index(row),
+                "row_index": index,
+                "page_id": row.get("page_id", ""),
                 "page_name": page_name,
                 "title": row.get("title", ""),
                 "description": row.get("description", ""),
@@ -134,6 +143,14 @@ class ConfigPresenter:
                 "comment_image_paths": row.get("comment_images", ""),
                 "post_type": row.get("post_type", "video"),
             })
+
+        if skipped:
+            self._main_view.show_warning(
+                "Thiếu video",
+                "Các page sau chưa có video nên sẽ không đăng:\n• "
+                + "\n• ".join(skipped)
+                + "\n\nHãy bấm 'Chọn video' để gán video cho các page này.",
+            )
 
         if not posting_rows:
             self._main_view.show_warning("Thiếu dữ liệu", "Không có page nào đủ điều kiện để đăng.")
@@ -150,13 +167,22 @@ class ConfigPresenter:
                 concurrency_enabled=concurrency_enabled,
                 concurrency_threads=concurrency_threads,
                 concurrency_delay=concurrency_delay,
-                on_status=lambda name, s, d: self._view.update_config_status(name, s),
+                on_status=self._on_post_status,
                 on_config_status=lambda name, s: self._view.update_config_status(name, s),
                 on_link=on_link,
                 on_complete=on_complete,
             )
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_post_status(self, page_name: str, status: str, detail: str = "") -> None:
+        """Ghi log chi tiết (trước đây thông điệp lỗi bị vứt mất nên rất khó truy)."""
+        if status == "Thất bại":
+            logger.error("Hàng đợi | page=%s | %s | %s", page_name, status, detail)
+        else:
+            logger.info("Hàng đợi | page=%s | %s | %s", page_name, status, detail)
+        self._main_view.show_status(f"{page_name}: {status}" + (f" - {detail}" if detail else ""))
+        self._view.update_config_status(page_name, status)
 
     def set_post_type_for_all_rows(self, post_type: str) -> None:
         rows = self._view.get_config_rows()
