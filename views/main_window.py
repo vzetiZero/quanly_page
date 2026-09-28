@@ -90,6 +90,9 @@ PAGE_POST_STATUS_STYLES = {
 class FacebookPageManagerWindow(QtWidgets.QMainWindow):
     config_status_changed = QtCore.pyqtSignal(str, str, str)
     config_link_changed = QtCore.pyqtSignal(str, str, str)
+    # Log từ thread nền (worker đăng / scheduler) được đẩy qua signal để
+    # append vào QPlainTextEdit an toàn trên GUI thread.
+    log_message = QtCore.pyqtSignal(str, str)
 
     def __init__(self, container: Any) -> None:
         super().__init__()
@@ -110,10 +113,18 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self.config_status_changed.connect(self._apply_config_status)
         self.config_link_changed.connect(self._apply_config_link)
+        self.log_message.connect(self._append_log_message)
+        # Nạp log của những lần chạy trước để tab Log không trống khi mở app.
+        try:
+            self.log_tab.load_history(self._container.project_dir / "facebook_scraper.log")
+        except Exception:
+            pass
 
     def set_presenter(self, presenter: Any) -> None:
         self._presenter = presenter
         self._bind_events()
+        # Đổ lịch sử đăng đã lưu vào tab khi mở app.
+        self._on_load_recent_posts_page(1)
 
     # ── Luôn đọc/ghi trực tiếp vào presenter (tránh tham chiếu cũ khi dict bị gán lại) ──
     @property
@@ -427,6 +438,11 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.schedule_auto_btn.clicked.connect(lambda: p.schedule.toggle_auto())
         self.schedule_clear_btn.clicked.connect(lambda: p.schedule.clear_pending())
 
+        self.recent_posts_tab.set_load_callback(self._on_load_recent_posts_page)
+        self.recent_posts_tab.prev_btn.clicked.connect(self.recent_posts_tab.go_prev)
+        self.recent_posts_tab.next_btn.clicked.connect(self.recent_posts_tab.go_next)
+        self.recent_posts_tab.clear_btn.clicked.connect(self._on_clear_recent_posts)
+
     def _on_load_tokens(self) -> None:
         dialog = QtWidgets.QFileDialog(self)
         dialog.setWindowTitle("Chọn file txt")
@@ -688,7 +704,9 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.post_config_btn.setEnabled(True)
         self.post_config_btn.setText("Đăng")
         self.status_label.setText(f"Hoàn tất: thành công {success}, thất bại {fail}")
+        self.log(f"Đăng xong: thành công {success}, thất bại {fail}", "info" if fail == 0 else "warning")
         self._load_local_stats()
+        self._on_load_recent_posts_page(self.recent_posts_tab.recent_page)
         if failures:
             # Ghi lý do vào tooltip của ô Trạng thái + log ra màn hình để biết
             # chính xác page nào hỏng vì gì.
@@ -713,8 +731,11 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
                 return
 
     def _on_tab_changed(self, index: int) -> None:
-        if self.tabs.widget(index) is getattr(self, "stats_tab", None):
+        widget = self.tabs.widget(index)
+        if widget is getattr(self, "stats_tab", None):
             self._load_local_stats()
+        elif widget is getattr(self, "recent_posts_tab", None):
+            self._on_load_recent_posts_page(self.recent_posts_tab.recent_page)
 
     def _load_local_stats(self) -> None:
         try:
@@ -1023,7 +1044,28 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.token_input.setPlainText(text)
 
     def log(self, message: str, level: str = "info") -> None:
+        # Đẩy qua signal để an toàn khi được gọi từ thread nền.
+        self.log_message.emit(message, level)
+
+    def _append_log_message(self, message: str, level: str) -> None:
         self.log_tab.append_log(message, level)
+
+    # ── Tab Lịch sử đăng ──────────────────────────────────────────
+
+    def _on_load_recent_posts_page(self, page: int) -> None:
+        try:
+            limit = self.recent_posts_tab.recent_page_size
+            offset = (max(1, page) - 1) * limit
+            rows, total = self._container.db.load_recent_posts(offset, limit)
+            self.recent_posts_tab.load_page(rows, total, page)
+        except Exception:
+            logger.exception("Không tải được lịch sử đăng")
+
+    def _on_clear_recent_posts(self) -> None:
+        if self.confirm("Xóa lịch sử", "Xóa toàn bộ lịch sử đăng đã lưu?"):
+            self._container.db.clear_recent_posts()
+            self._on_load_recent_posts_page(1)
+            self.log("Đã xóa lịch sử đăng", "info")
 
     def closeEvent(self, event: Any) -> None:
         """Nhắc trước khi đóng khi còn lịch chờ — đóng app sẽ không tự đăng nữa."""

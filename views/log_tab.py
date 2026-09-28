@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 from PyQt5 import QtCore, QtWidgets
@@ -28,3 +29,21 @@ class LogTab(QtWidgets.QWidget):
         line = f"{timestamp} [{prefix}] {message}"
         self.log_output.appendPlainText(line)
         self.log_output.ensureCursorVisible()
+
+    def load_history(self, file_path: str, max_lines: int = 500) -> None:
+        """Nạp N dòng cuối của file log cũ để tab không trống khi mở app.
+
+        Dòng trong file đã có sẵn dấu thời gian nên thêm nguyên văn, không
+        prefix lại như ``append_log``.
+        """
+        try:
+            path = os.fspath(file_path)
+            if not os.path.exists(path):
+                return
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+            for line in lines[-max_lines:]:
+                self.log_output.appendPlainText(line)
+            self.log_output.ensureCursorVisible()
+        except Exception:
+            pass

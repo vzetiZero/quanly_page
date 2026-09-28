@@ -116,6 +116,7 @@ class ConfigPresenter:
         self._view.set_post_config_button_enabled(False)
         self._view.set_post_config_button_text("Đang đăng...")
         self._main_view.show_status("Đang xử lý hàng đợi đăng video...")
+        self._main_view.log(f"Bắt đầu đăng {len(self._view.get_config_rows())} dòng trong hàng đợi", "info")
 
         rows = self._view.get_config_rows()
         posting_rows = []
@@ -179,9 +180,14 @@ class ConfigPresenter:
         """Ghi log chi tiết (trước đây thông điệp lỗi bị vứt mất nên rất khó truy)."""
         if status == "Thất bại":
             logger.error("Hàng đợi | page=%s | %s | %s", page_name, status, detail)
+            level = "error"
         else:
             logger.info("Hàng đợi | page=%s | %s | %s", page_name, status, detail)
-        self._main_view.show_status(f"{page_name}: {status}" + (f" - {detail}" if detail else ""))
+            level = "info"
+        # Chuyển lên tab Log (qua signal trong view nên an toàn với thread nền).
+        message = f"{page_name}: {status}" + (f" - {detail}" if detail else "")
+        self._main_view.log(message, level)
+        self._main_view.show_status(message)
         self._view.update_config_status(page_name, status)
 
     def set_post_type_for_all_rows(self, post_type: str) -> None:
