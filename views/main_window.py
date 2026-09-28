@@ -62,6 +62,8 @@ CONFIG_STATUS_STYLES = {
     "Đang đăng": ("#b45309", "#fef3c7"),
     "Đang chờ lịch": ("#1d4ed8", "#dbeafe"),
     "Chờ đăng": ("#1d4ed8", "#dbeafe"),
+    "Chờ đến giờ": ("#1d4ed8", "#dbeafe"),
+    "Đang đăng lịch": ("#b45309", "#fef3c7"),
     "Đã đăng trước đó": ("#64748b", "#f1f5f9"),
     "Bỏ qua": ("#64748b", "#f1f5f9"),
     "Hết video mới": ("#b91c1c", "#fee2e2"),
@@ -345,6 +347,21 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         ctrl_row.addWidget(self.post_config_btn)
         queue_layout.addLayout(ctrl_row)
 
+        schedule_row = QtWidgets.QHBoxLayout()
+        self.schedule_batch_btn = QtWidgets.QPushButton("Lên lịch hàng loạt")
+        apply_small_button_style(self.schedule_batch_btn)
+        schedule_row.addWidget(self.schedule_batch_btn)
+        self.schedule_auto_btn = QtWidgets.QPushButton("Bật lịch tự động")
+        apply_small_button_style(self.schedule_auto_btn)
+        schedule_row.addWidget(self.schedule_auto_btn)
+        self.schedule_clear_btn = QtWidgets.QPushButton("Xoá lịch chờ")
+        apply_small_button_style(self.schedule_clear_btn)
+        schedule_row.addWidget(self.schedule_clear_btn)
+        self.schedule_info_label = QtWidgets.QLabel("Chưa có lịch chờ")
+        self.schedule_info_label.setStyleSheet("color: #334155; font-weight: 650;")
+        schedule_row.addWidget(self.schedule_info_label, 1)
+        queue_layout.addLayout(schedule_row)
+
         self.config_table = QtWidgets.QTableWidget(0, len(CONFIG_HEADERS))
         self.config_table.setHorizontalHeaderLabels(CONFIG_HEADERS)
         self.config_table.setAlternatingRowColors(True)
@@ -406,6 +423,9 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.choose_videos_btn.clicked.connect(self._on_choose_videos)
         self.posted_videos_btn.clicked.connect(self._on_view_posted_videos)
         self.apply_content_btn.clicked.connect(self._on_apply_quick_content)
+        self.schedule_batch_btn.clicked.connect(lambda: p.schedule.plan_batch())
+        self.schedule_auto_btn.clicked.connect(lambda: p.schedule.toggle_auto())
+        self.schedule_clear_btn.clicked.connect(lambda: p.schedule.clear_pending())
 
     def _on_load_tokens(self) -> None:
         dialog = QtWidgets.QFileDialog(self)
@@ -989,7 +1009,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         return reply == QtWidgets.QMessageBox.Yes
 
     def set_controls_enabled(self, enabled: bool) -> None:
-        for w in [self.load_tokens_btn, self.load_pages_btn, self.select_all_btn, self.clear_btn, self.token_input, self.page_table, self.config_table, self.add_row_btn, self.clear_config_btn, self.post_config_btn]:
+        for w in [self.load_tokens_btn, self.load_pages_btn, self.select_all_btn, self.clear_btn, self.token_input, self.page_table, self.config_table, self.add_row_btn, self.clear_config_btn, self.post_config_btn, self.schedule_batch_btn, self.schedule_auto_btn, self.schedule_clear_btn]:
             w.setEnabled(enabled)
 
     def update_trial_status(self, label: str, style: str) -> None:
@@ -1004,6 +1024,26 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
 
     def log(self, message: str, level: str = "info") -> None:
         self.log_tab.append_log(message, level)
+
+    def closeEvent(self, event: Any) -> None:
+        """Nhắc trước khi đóng khi còn lịch chờ — đóng app sẽ không tự đăng nữa."""
+        presenter = getattr(self, "_presenter", None)
+        scheduler = getattr(presenter, "schedule", None) if presenter else None
+        if scheduler is not None:
+            try:
+                pending = scheduler.pending_count()
+            except Exception:
+                pending = 0
+            if pending:
+                message = (
+                    f"Còn {pending} video đang chờ đến giờ đăng.\n\n"
+                    "Lịch vẫn được giữ trong cơ sở dữ liệu, nhưng sẽ không tự đăng "
+                    "cho tới khi bạn mở lại app và bật lịch tự động.\n\nVẫn đóng?"
+                )
+                if not self.confirm("Còn lịch chờ", message):
+                    event.ignore()
+                    return
+        super().closeEvent(event)
 
     # ── IPageListView interface implementation ────────────────────
 
@@ -1249,7 +1289,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
             self.config_table.setItem(row_idx, CONFIG_POST_TYPE_COL, type_item)
         type_item.setText("Feed" if post_type == "feed" else "Reel / video")
         type_item.setTextAlignment(QtCore.Qt.AlignCenter)
-        self._set_table_value(row_idx, CONFIG_SCHEDULE_COL, row_data.get("schedule_time", ""))
+        self._set_schedule_value(row_idx, row_data.get("schedule_time", ""))
         initial_status = row_data.get("status", "Chờ đăng")
         self._set_table_value(row_idx, CONFIG_STATUS_COL, initial_status)
         self._apply_config_row_color(row_idx, initial_status)
@@ -1371,7 +1411,7 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
                 "video_path": values[3], "comment": values[4],
                 "comment_images": values[CONFIG_COMMENT_IMAGE_COL],
                 "post_type": values[CONFIG_POST_TYPE_COL],
-                "schedule_time": values[CONFIG_SCHEDULE_COL],
+                "schedule_time": self._read_schedule_value(row_idx, values[CONFIG_SCHEDULE_COL]),
                 "status": values[CONFIG_STATUS_COL], "link": values[CONFIG_LINK_COL],
                 "posted_at": values[CONFIG_POSTED_AT_COL],
             })
@@ -1382,6 +1422,68 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
 
     def set_post_config_button_text(self, text: str) -> None:
         self.post_config_btn.setText(text)
+
+    # ── IScheduleView interface implementation ─────────────────────
+
+    def ask_schedule_plan(self, count: int) -> Optional[Dict[str, Any]]:
+        from views.schedule_dialog import SchedulePlanDialog
+
+        dialog = SchedulePlanDialog(count, self)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+        return dialog.current_plan()
+
+    def apply_schedule_times(self, rows: List[Dict[str, Any]]) -> None:
+        """Ghi giờ đã lên lịch vào cột "Thời gian đăng" của hàng đợi."""
+        applied = 0
+        for row in rows:
+            page_name = str(row.get("page_name") or row.get("page") or "").strip()
+            page_id = str(row.get("page_id") or "")
+            schedule_time = str(row.get("schedule_time") or "").strip()
+            if not schedule_time or not page_name:
+                continue
+            table_row = self._find_config_row(page_id, page_name)
+            if table_row < 0:
+                continue
+            self._set_schedule_value(table_row, schedule_time)
+            applied += 1
+        if applied:
+            self.statusBar().showMessage(f"Đã gán giờ cho {applied} dòng", 5000)
+
+    def _set_schedule_value(self, row_idx: int, schedule_time: Any) -> None:
+        """Hiển thị giờ dạng ngày/giờ, giữ bản ISO ở UserRole cho lúc đăng."""
+        raw = str(schedule_time or "").strip()
+        self._set_table_value(row_idx, CONFIG_SCHEDULE_COL, self._format_schedule_time(raw))
+        item = self.config_table.item(row_idx, CONFIG_SCHEDULE_COL)
+        if item is not None and raw:
+            item.setData(QtCore.Qt.UserRole, raw)
+            item.setToolTip(raw)
+            item.setForeground(QtGui.QColor("#1d4ed8"))
+
+    def _read_schedule_value(self, row_idx: int, text: str) -> str:
+        """Lấy giờ để đăng: ưu tiên bản ISO nếu ô chưa bị sửa tay."""
+        item = self.config_table.item(row_idx, CONFIG_SCHEDULE_COL)
+        stored = str(item.data(QtCore.Qt.UserRole) or "") if item is not None else ""
+        if stored and self._format_schedule_time(stored) == text:
+            return stored
+        return text
+
+    @staticmethod
+    def _format_schedule_time(schedule_time: str) -> str:
+        try:
+            return datetime.fromisoformat(str(schedule_time)).strftime("%d/%m/%Y %H:%M")
+        except Exception:
+            return str(schedule_time or "")
+
+    def update_schedule_info(self, pending: int, running: bool, dispatching: bool) -> None:
+        parts = [f"{pending} lịch chờ" if pending else "Chưa có lịch chờ"]
+        if running:
+            parts.append("đang chạy nền")
+        if dispatching:
+            parts.append("đang đăng...")
+        self.schedule_info_label.setText(" · ".join(parts))
+        self.schedule_auto_btn.setText("Tắt lịch tự động" if running else "Bật lịch tự động")
+        self.schedule_auto_btn.setStyleSheet("color: #b91c1c;" if running else "color: #15803d;")
 
     def _set_table_value(self, row_idx: int, col_idx: int, value: str) -> None:
         item = self.config_table.item(row_idx, col_idx)

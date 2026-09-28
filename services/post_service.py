@@ -1,5 +1,6 @@
 import logging
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -23,6 +24,26 @@ def _retry_delay_for_attempt(attempt: int, base_delay: int = 10) -> int:
     return base_delay * max(1, attempt)
 
 
+# Cột "Thời gian đăng" hiển thị dạng dd/MM/yyyy HH:mm nhưng vẫn chấp nhận cả
+# ISO và các biến thể thường gặp để không bị bỏ qua lịch chỉ vì sai định dạng.
+SCHEDULE_FORMATS = ("%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S")
+
+
+def parse_schedule_time(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in SCHEDULE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
 def chunked_batches(items: list, size: int) -> list:
     if size <= 1:
         return [list(items)]
@@ -42,6 +63,14 @@ class PostService:
         self.post_retry_count = 2
         self.post_retry_delay_base = 10
         self.stop_requested = False
+        # Khoá để lô đăng thủ công và lô của scheduler không chạy chồng nhau
+        # (2 lô cùng lúc dễ đụng nhau ở tầng proxy/rate limit của Facebook).
+        self._queue_lock = threading.Lock()
+        self._busy = False
+
+    @property
+    def is_busy(self) -> bool:
+        return self._busy
 
     def _build_public_post_payload(self, page: Dict[str, Any], message: str, *, title: Optional[str] = None, description: Optional[str] = None) -> Dict[str, str]:
         payload: Dict[str, str] = {
@@ -392,21 +421,61 @@ class PostService:
         on_link: Optional[Callable] = None,
         on_complete: Callable = None,
     ) -> None:
+        """Đăng cả hàng đợi. Luôn đặt ``entry["result"]["status"]`` cho mỗi dòng.
+
+        Scheduler cần đọc ``result["status"]`` để ghi lại kết quả từng lịch
+        (``success`` / ``failed`` / ``skipped``), nên kể cả khi thất bại cũng
+        phải có trạng thái thay vì im lặng.
+        """
+        with self._queue_lock:
+            self._busy = True
+            try:
+                self._run_config_post_queue(
+                    rows=rows,
+                    pages=pages,
+                    base_url=base_url,
+                    concurrency_enabled=concurrency_enabled,
+                    concurrency_threads=concurrency_threads,
+                    concurrency_delay=concurrency_delay,
+                    on_status=on_status,
+                    on_config_status=on_config_status,
+                    on_link=on_link,
+                    on_complete=on_complete,
+                )
+            finally:
+                self._busy = False
+
+    def _run_config_post_queue(
+        self,
+        rows: List[Dict[str, Any]],
+        pages: List[Dict[str, Any]],
+        base_url: str,
+        concurrency_enabled: bool,
+        concurrency_threads: int,
+        concurrency_delay: float,
+        on_status: Callable,
+        on_config_status: Callable,
+        on_link: Optional[Callable] = None,
+        on_complete: Callable = None,
+    ) -> None:
         success_count = 0
         fail_count = 0
         use_concurrency = concurrency_enabled and len(rows) > 1
         max_workers = concurrency_threads if use_concurrency else 1
         # (page_name, lý do) để báo lại cho người dùng biết page nào hỏng vì gì.
         failure_reasons: List[tuple] = []
-        page_pool = {str(p.get("id") or ""): p for p in pages or [] if p.get("id")}
 
-        def record_failure(page_name: str, reason: str, page_id: str = "") -> None:
+        def record_failure(entry: Dict[str, Any], reason: str) -> None:
+            """Ghi lỗi cho đúng dòng đang chạy (giữ luôn page_id để khớp chuẩn)."""
             nonlocal fail_count
+            page_name = str(entry.get("page_name") or "")
+            page_id = str(entry.get("page_id") or "")
             fail_count += 1
             failure_reasons.append((page_name, reason))
             logger.error("Đăng thất bại | page=%s | %s", page_name, reason)
             on_config_status(page_name, "Thất bại", page_id)
             on_status(page_name, "Thất bại", reason)
+            entry["result"] = {"status": "failed", "error": reason}
 
         def worker(entry: Dict[str, Any], start_delay: float = 0.0) -> None:
             nonlocal success_count
@@ -416,6 +485,7 @@ class PostService:
                 while time.time() < deadline and not self.stop_requested:
                     time.sleep(min(0.25, deadline - time.time()))
             if self.stop_requested:
+                entry["result"] = {"status": "stopped", "error": "Người dùng đã bấm Dừng"}
                 return
             page_name = entry["page_name"]
             page_id = str(entry.get("page_id") or "")
@@ -426,7 +496,7 @@ class PostService:
             if video_path and Path(video_path).name in self.load_posted_video_names(page_name):
                 on_config_status(page_name, "Đã đăng trước đó", page_id)
                 on_status(page_name, "Bỏ qua", "Video đã đăng cho page này, không đăng lại")
-                entry["result"] = {"skipped": True, "reason": "already_posted"}
+                entry["result"] = {"status": "skipped", "skipped": True, "reason": "already_posted"}
                 return
 
             on_config_status(page_name, "Đang đăng", page_id)
@@ -434,25 +504,29 @@ class PostService:
 
             try:
                 if not video_path:
-                    record_failure(page_name, "Dòng này chưa có video, hãy bấm 'Chọn video' để gán video.", page_id)
+                    record_failure(entry, "Dòng này chưa có video, hãy bấm 'Chọn video' để gán video.")
                     return
                 matching_page = self._match_page(pages, page_name, page_id)
                 if not matching_page:
-                    record_failure(page_name, "Không tìm thấy page trong danh sách (tên/id không khớp).", page_id)
+                    record_failure(entry, "Không tìm thấy page trong danh sách (tên/id không khớp).")
                     return
                 if not str(matching_page.get("access_token") or "").strip():
-                    record_failure(page_name, "Thiếu Page Access Token cho page này.", page_id)
+                    record_failure(entry, "Thiếu Page Access Token cho page này.")
                     return
 
                 schedule_time = entry.get("schedule_time")
                 if schedule_time:
-                    try:
-                        parsed = datetime.fromisoformat(schedule_time)
-                        if parsed > datetime.now():
-                            on_config_status(page_name, "Đang chờ lịch", page_id)
-                            time.sleep(max(0, (parsed - datetime.now()).total_seconds()))
-                    except Exception:
-                        pass
+                    parsed = parse_schedule_time(schedule_time)
+                    if parsed and parsed > datetime.now():
+                        on_config_status(page_name, "Đang chờ lịch", page_id)
+                        # Vẫn dừng được trong lúc chờ (nếu ngủ thẳng thì bấm
+                        # "Dừng" không có tác dụng tới các dòng chờ lịch).
+                        deadline = parsed.timestamp()
+                        while time.time() < deadline and not self.stop_requested:
+                            time.sleep(min(0.5, max(0.0, deadline - time.time())))
+                        if self.stop_requested:
+                            entry["result"] = {"status": "stopped", "error": "Người dùng đã bấm Dừng"}
+                            return
 
                 proxy_info = self._proxy_provider.fetch_proxy()
                 proxy_config = self._proxy_provider.build_proxy_config(proxy_info)
@@ -467,7 +541,7 @@ class PostService:
                 post_id = self._extract_post_id(post_result)
                 permalink = str(post_result.get("permalink_url") or post_result.get("link") or "")
 
-                on_config_status(page_name, "Thành công")
+                on_config_status(page_name, "Thành công", page_id)
                 on_status(page_name, "Thành công", "Đăng thành công")
                 if on_link and permalink:
                     on_link(page_name, permalink)
@@ -484,9 +558,12 @@ class PostService:
                     except Exception as exc:
                         logger.warning("Comment bị chặn cho page=%s: %s", page_name, exc)
 
-                entry["result"] = {"post_id": post_id, "permalink_url": permalink, "comment_ok": has_comment}
+                entry["result"] = {
+                    "status": "success", "post_id": post_id,
+                    "permalink_url": permalink, "comment_ok": has_comment,
+                }
             except Exception as exc:
-                record_failure(page_name, str(exc) or exc.__class__.__name__)
+                record_failure(entry, str(exc) or exc.__class__.__name__)
 
         if use_concurrency:
             # Một pool duy nhất cho TẤT CẢ page: page thứ 3+ không phải chờ

@@ -8,6 +8,7 @@ from di.container import Container
 from di.interfaces import IMainView
 from presenters.page_list_presenter import PageListPresenter
 from presenters.config_presenter import ConfigPresenter
+from presenters.schedule_presenter import SchedulePresenter
 from presenters.settings_presenter import SettingsPresenter
 
 
@@ -35,11 +36,20 @@ class MainPresenter:
             main_view=view,
             page_service=container.page_service,
         )
+        self.schedule = SchedulePresenter(
+            view=view,
+            main_view=view,
+            schedule_service=container.schedule_service,
+            settings_repo=container.db,
+            page_source=lambda: self.page_list.pages,
+            concurrency_source=view.get_concurrency_config,
+        )
 
     def on_app_start(self) -> None:
         self._view.set_controls_enabled(False)
         self._load_saved_config()
         self.page_list.load_all_from_cache()
+        self.schedule.on_app_start()
 
     def on_trial_check(self) -> None:
         try:
@@ -88,6 +98,8 @@ class MainPresenter:
     def on_stop(self) -> None:
         self.stop_requested = True
         self._container.post_service.stop_requested = True
+        # Bấm "Dừng" thì dừng luôn lịch chạy nền, và không tự bật lại lần sau.
+        self.schedule.stop(remember=False)
 
     def on_tokens_file_loaded(self, file_path: str) -> None:
         try:
@@ -135,6 +147,8 @@ class MainPresenter:
             self.license_locked = False
             self._view.set_controls_enabled(True)
             self._view.show_status("Bản dùng thử đã được kích hoạt")
+            # Chỉ bật lịch chạy nền khi app đã qua kiểm tra bản quyền.
+            self.schedule.start_auto_if_enabled()
             self._update_trial_status()
         except Exception:
             self._lock_trial_expired()
@@ -142,6 +156,8 @@ class MainPresenter:
     def _lock_trial_expired(self) -> None:
         self.license_locked = True
         self._view.set_controls_enabled(False)
+        # Hết hạn giữa chừng thì dừng lịch, nhưng giữ nguyên lựa chọn của người dùng.
+        self.schedule.stop()
         self._view.show_status("Bản dùng thử chưa được kích hoạt hoặc đã hết hạn.")
         self._view.update_trial_status("Trial: đã hết hạn", "background: #1f0707; border: 1px solid #ef4444; border-radius: 8px; padding: 6px 10px; color: #fecaca; font-weight: 800;")
 

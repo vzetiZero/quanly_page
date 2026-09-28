@@ -139,6 +139,43 @@ class DatabaseManager:
                 )
                 """
             )
+            # Lịch đăng chạy nền: mỗi dòng là 1 video sẽ đăng cho 1 page tại
+            # 1 mốc thời gian. Giữ trong DB để lịch còn nguyên sau khi mở lại app.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scheduled_posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    page_key TEXT NOT NULL,
+                    page_id TEXT,
+                    page_name TEXT NOT NULL,
+                    title TEXT,
+                    description TEXT,
+                    video_path TEXT,
+                    comment_text TEXT,
+                    comment_image_paths TEXT,
+                    post_type TEXT DEFAULT 'video',
+                    schedule_time TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    link TEXT DEFAULT '',
+                    error TEXT DEFAULT '',
+                    created_at TEXT,
+                    dispatched_at TEXT DEFAULT '',
+                    posted_at TEXT DEFAULT '',
+                    UNIQUE(page_key, schedule_time)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scheduled_due ON scheduled_posts(status, schedule_time)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+                """
+            )
             conn.commit()
 
     # ── Token operations ──────────────────────────────────────────
@@ -558,6 +595,166 @@ class DatabaseManager:
                 (page_id, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Lịch đăng (scheduler) ─────────────────────────────────────
+
+    def save_scheduled_posts(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Lưu danh sách lịch đăng, trả về các dòng đã lưu (kèm schedule_id).
+
+        Dùng ``ON CONFLICT(page_key, schedule_time)`` nên lên lịch lại cho đúng
+        page + đúng mốc thời gian sẽ ghi đè thay vì tạo dòng trùng.
+        """
+        saved: List[Dict[str, Any]] = []
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            for row in rows:
+                page_name = str(row.get("page_name") or "").strip()
+                schedule_time = str(row.get("schedule_time") or "").strip()
+                if not page_name or not schedule_time:
+                    continue
+                page_id = str(row.get("page_id") or "").strip()
+                page_key = page_id or page_name
+                conn.execute(
+                    """
+                    INSERT INTO scheduled_posts
+                        (page_key, page_id, page_name, title, description, video_path,
+                         comment_text, comment_image_paths, post_type, schedule_time,
+                         status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    ON CONFLICT(page_key, schedule_time) DO UPDATE SET
+                        page_id=excluded.page_id,
+                        page_name=excluded.page_name,
+                        title=excluded.title,
+                        description=excluded.description,
+                        video_path=excluded.video_path,
+                        comment_text=excluded.comment_text,
+                        comment_image_paths=excluded.comment_image_paths,
+                        post_type=excluded.post_type,
+                        status='pending',
+                        error='',
+                        dispatched_at='',
+                        posted_at=''
+                    """,
+                    (
+                        page_key, page_id, page_name,
+                        str(row.get("title") or ""), str(row.get("description") or ""),
+                        str(row.get("video_path") or ""), str(row.get("comment_text") or ""),
+                        str(row.get("comment_image_paths") or ""), str(row.get("post_type") or "video"),
+                        schedule_time, datetime.now().isoformat(),
+                    ),
+                )
+                saved_id = conn.execute(
+                    "SELECT id FROM scheduled_posts WHERE page_key = ? AND schedule_time = ?",
+                    (page_key, schedule_time),
+                ).fetchone()
+                saved.append({**row, "schedule_id": int(saved_id[0]), "page_key": page_key})
+            conn.commit()
+        return saved
+
+    def load_pending_scheduled_posts(self, limit: int = 200) -> List[Dict[str, Any]]:
+        return self._load_scheduled("SELECT * FROM scheduled_posts WHERE status = 'pending' ORDER BY schedule_time ASC", limit)
+
+    def load_due_scheduled_posts(self, now_iso: str) -> List[Dict[str, Any]]:
+        """Các lịch đã tới giờ (schedule_time <= now) và chưa được bắt đầu."""
+        return self._load_scheduled(
+            "SELECT * FROM scheduled_posts WHERE status = 'pending' AND schedule_time <= ? ORDER BY schedule_time ASC",
+            limit=100,
+            params=(now_iso,),
+        )
+
+    def mark_scheduled_dispatched(self, ids: List[int], when_iso: str = "") -> None:
+        if not ids:
+            return
+        stamp = when_iso or datetime.now().isoformat()
+        placeholders = ",".join("?" for _ in ids)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                f"UPDATE scheduled_posts SET status = 'running', dispatched_at = ? WHERE id IN ({placeholders})",
+                [stamp, *ids],
+            )
+            conn.commit()
+
+    def reset_running_scheduled_posts(self) -> int:
+        """Trả các lịch bị kẹt ở trạng thái 'running' về 'pending'.
+
+        Dùng khi mở app: nếu app bị tắt giữa chừng thì lịch đó không bao giờ
+        được gửi lại nếu không có bước này.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("UPDATE scheduled_posts SET status = 'pending' WHERE status = 'running'")
+            conn.commit()
+            return cursor.rowcount or 0
+
+    def update_scheduled_result(self, schedule_id: int, status: str, link: str = "", error: str = "", posted_at: str = "") -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE scheduled_posts
+                SET status = ?, link = ?, error = ?, posted_at = ?
+                WHERE id = ?
+                """,
+                (status, link, error, posted_at, schedule_id),
+            )
+            conn.commit()
+
+    def delete_scheduled_posts(self, ids: List[int]) -> int:
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(f"DELETE FROM scheduled_posts WHERE id IN ({placeholders})", ids)
+            conn.commit()
+            return cursor.rowcount or 0
+
+    def clear_scheduled_posts(self, statuses: Optional[List[str]] = None) -> int:
+        target = list(statuses or ["pending"])
+        placeholders = ",".join("?" for _ in target)
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(f"DELETE FROM scheduled_posts WHERE status IN ({placeholders})", target)
+            conn.commit()
+            return cursor.rowcount or 0
+
+    def count_scheduled_posts(self, statuses: Optional[List[str]] = None) -> int:
+        target = list(statuses or ["pending"])
+        placeholders = ",".join("?" for _ in target)
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM scheduled_posts WHERE status IN ({placeholders})", target
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def load_scheduled_posts(self, limit: int = 500) -> List[Dict[str, Any]]:
+        return self._load_scheduled("SELECT * FROM scheduled_posts ORDER BY schedule_time ASC", limit)
+
+    def _load_scheduled(self, query: str, limit: int, params: tuple = ()) -> List[Dict[str, Any]]:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(f"{query} LIMIT ?", (*params, limit)).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    # ── Cài đặt app (key/value) ────────────────────────────────────
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+        except Exception:
+            return default
+        return str(row[0]) if row and row[0] is not None else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO app_settings (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, str(value)),
+            )
+            conn.commit()
 
     # ── Bulk cache clear ──────────────────────────────────────────
 

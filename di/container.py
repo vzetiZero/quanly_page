@@ -13,6 +13,7 @@ from services.config_service import ConfigService
 from services.license_service import LicenseService
 from services.page_detail_service import PageDetailService
 from services.stats_service import StatsService
+from services.schedule_service import ScheduleService
 
 
 class Container:
@@ -65,6 +66,11 @@ class Container:
         )
         self.stats_service = StatsService(
             stats_repo=self.db,
+            base_url=base_url,
+        )
+        self.schedule_service = ScheduleService(
+            schedule_repo=self.db,
+            post_service=self.post_service,
             base_url=base_url,
         )
 
