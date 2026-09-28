@@ -1,4 +1,5 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -18,6 +19,12 @@ VIDEO_INSIGHT_METRICS = [
 ]
 # Số video tối đa lấy về để đếm + cộng view (tránh chạy quá lâu).
 MAX_VIDEOS = 200
+# Số video tối đa hiển thị trong "Danh sách video của page" ở hộp thoại chi tiết.
+MAX_DETAIL_VIDEOS = 100
+# Mỗi video mất 1 request/metric insights -> giới hạn để không bị treo.
+MAX_INSIGHT_VIDEOS = 60
+# Field lấy kèm khi liệt kê video; nếu Meta từ chối thì tự lùi về chỉ "id".
+VIDEO_LIST_FIELDS = "id,description,created_time,permalink_url,thumb_url,length,views_count"
 
 
 class StatsService:
@@ -39,6 +46,15 @@ class StatsService:
     def load_saved_stats(self) -> List[Dict[str, Any]]:
         return self._repo.load_all_page_stats()
 
+    def stat_map(self) -> Dict[str, Dict[str, Any]]:
+        """Bản đồ số liệu đã lưu, khoá theo tên page (trùng khoá page_stats)."""
+        result: Dict[str, Dict[str, Any]] = {}
+        for row in self.load_saved_stats():
+            key = str(row.get("page_key") or row.get("page_name") or "").strip()
+            if key:
+                result[key] = row
+        return result
+
     def local_rows(self, pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         counts = self.local_video_counts()
         saved = {str(r.get("page_key")): r for r in self.load_saved_stats()}
@@ -49,6 +65,7 @@ class StatsService:
             rows.append({
                 "page": page.get("name") or key,
                 "page_key": key,
+                "page_id": str(page.get("id") or ""),
                 "page_video_count": stat.get("video_count"),
                 "app_video_count": counts.get(key, 0),
                 "video_views": stat.get("video_views"),
@@ -173,6 +190,181 @@ class StatsService:
                     return total
         return None
 
+    # ── Danh sách video chi tiết của 1 page ───────────────────────
+    def _paged_edge(
+        self, page_id: str, token: str, edge: str, fields: str, max_items: int
+    ) -> tuple:
+        """Đọc 1 edge có phân trang; trả (items, error)."""
+        out: List[Dict[str, Any]] = []
+        if max_items <= 0:
+            return out, None
+        after = None
+        while len(out) < max_items:
+            params: Dict[str, Any] = {
+                "access_token": token,
+                "fields": fields,
+                "limit": max(1, min(50, max_items - len(out))),
+            }
+            if after:
+                params["after"] = after
+            payload, error = self._get(f"/{page_id}/{edge}", params)
+            if error is not None:
+                return out, error
+            if not isinstance(payload, dict):
+                return out, "response khong hop le"
+            data = payload.get("data", []) or []
+            for item in data:
+                if isinstance(item, dict) and item.get("id"):
+                    out.append(item)
+            after = (payload.get("paging", {}) or {}).get("cursors", {}).get("after")
+            if not data or not after:
+                break
+        return out[:max_items], None
+
+    @staticmethod
+    def _normalize_video(item: Dict[str, Any]) -> Dict[str, Any]:
+        video_id = str(item.get("id") or "")
+        link = str(item.get("permalink_url") or "").strip()
+        if not link and video_id:
+            link = f"https://www.facebook.com/reel/{video_id}"
+        views = item.get("views_count")
+        if not isinstance(views, (int, float)):
+            views = None
+        title = item.get("title") or item.get("message") or item.get("description") or ""
+        return {
+            "id": video_id,
+            "title": str(title or "").strip(),
+            "link": link,
+            "created_time": str(item.get("created_time") or ""),
+            "views": int(views) if views is not None else None,
+            "views_source": "list" if views is not None else "",
+            "length": item.get("length") or "",
+        }
+
+    def _fill_video_views(self, token: str, videos: List[Dict[str, Any]]) -> None:
+        """Gọi insights cho video chưa có view (giới hạn số lần gọi)."""
+        todo = [v for v in videos if v.get("views") is None][:MAX_INSIGHT_VIDEOS]
+        if not todo:
+            return
+
+        def worker(video: Dict[str, Any]) -> None:
+            try:
+                video["views"] = self._video_views(token, video["id"])
+                video["views_source"] = "insight"
+            except Exception:
+                logger.debug("Không lấy được view của video %s", video.get("id"), exc_info=True)
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            list(executor.map(worker, todo))
+
+    def fetch_page_videos(
+        self, page_id: str, token: str, max_videos: int = MAX_DETAIL_VIDEOS
+    ) -> List[Dict[str, Any]]:
+        """Danh sách video của page (mới nhất trước) kèm link + số view."""
+        if not page_id or not token:
+            return []
+        collected: List[Dict[str, Any]] = []
+        seen = set()
+        for edge in ("video_reels", "videos"):
+            remaining = max_videos - len(collected)
+            if remaining <= 0:
+                break
+            items, error = self._paged_edge(page_id, token, edge, VIDEO_LIST_FIELDS, remaining)
+            if error and not items:
+                # Meta từ chối field phức tạp -> lùi về chỉ lấy id.
+                items, error = self._paged_edge(page_id, token, edge, "id", remaining)
+                if error:
+                    logger.info("Page %s: không lấy được edge '%s': %s", page_id, edge, error)
+            for item in items:
+                video_id = str(item.get("id") or "")
+                if not video_id or video_id in seen:
+                    continue
+                seen.add(video_id)
+                collected.append(self._normalize_video(item))
+        collected.sort(key=lambda v: v.get("created_time") or "", reverse=True)
+        self._fill_video_views(token, collected)
+        logger.info("Page %s: lấy %d video có chi tiết (view cho %d video)",
+                    page_id, len(collected), sum(1 for v in collected if v.get("views") is not None))
+        return collected
+
+    def fetch_page_videos_async(
+        self,
+        page_id: str,
+        token: str,
+        on_complete: Callable[[List[Dict[str, Any]]], None],
+        on_error: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        import threading
+
+        def worker() -> None:
+            try:
+                on_complete(self.fetch_page_videos(page_id, token))
+            except Exception as exc:
+                logger.warning("Lỗi lấy danh sách video của page %s: %s", page_id, exc)
+                if on_error:
+                    on_error(str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def refresh_page(self, page: Dict[str, Any]) -> Dict[str, Any]:
+        """Cập nhật số liệu (video/view/followers) cho đúng 1 page, trả về 1 dòng."""
+        page_id = str(page.get("id") or "")
+        page_name = str(page.get("name") or page_id)
+        token = str(page.get("access_token") or "")
+        followers: Optional[int] = None
+        fan_count: Optional[int] = None
+        video_count: Optional[int] = None
+        video_views: Optional[int] = None
+
+        if page_id and token:
+            counts = self._page_counts(page_id, token)
+            followers = counts.get("followers_count")
+            fan_count = counts.get("fan_count")
+            video_ids = self._page_videos(page_id, token)
+            if video_ids:
+                video_count = len(video_ids)
+                video_views = self._sum_video_views(token, video_ids)
+            if video_views is None:
+                video_views = self._page_video_views(page_id, token)
+            self._repo.save_page_stats(page_name, page_name, video_count or 0, video_views, followers, fan_count)
+
+        status, status_text = "ok", "Thành công"
+        if not token:
+            status, status_text = "error", "Thiếu token"
+        elif followers is None and video_count is None:
+            status, status_text = "error", "Không lấy được dữ liệu"
+        return {
+            "page": page_name,
+            "page_key": page_name,
+            "page_id": page_id,
+            "page_video_count": video_count,
+            "app_video_count": self.local_video_counts().get(page_name, 0),
+            "video_views": video_views,
+            "followers": followers,
+            "fan_count": fan_count,
+            "status": status,
+            "status_text": status_text,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S") if status == "ok" else "",
+        }
+
+    def refresh_page_async(
+        self,
+        page: Dict[str, Any],
+        on_complete: Callable[[Dict[str, Any]], None],
+        on_error: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        import threading
+
+        def worker() -> None:
+            try:
+                on_complete(self.refresh_page(page))
+            except Exception as exc:
+                logger.warning("Lỗi cập nhật số liệu page %s: %s", page.get("id"), exc)
+                if on_error:
+                    on_error(str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def refresh(self, pages: List[Dict[str, Any]], on_page: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[Dict[str, Any]]:
         app_counts = self.local_video_counts()
         rows: List[Dict[str, Any]] = []
@@ -215,6 +407,7 @@ class StatsService:
             row = {
                 "page": page_name,
                 "page_key": page_key,
+                "page_id": page_id,
                 "page_video_count": page_video_count,
                 "app_video_count": app_video_count,
                 "video_views": video_views,

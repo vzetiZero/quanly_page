@@ -1,11 +1,38 @@
 from typing import Any, Dict, List, Optional
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
+
+# ── Danh sách video của page ──────────────────────────────────────
+VIDEO_HEADERS = ["STT", "Ngày đăng", "Nội dung", "Link video", "View"]
+VIDEO_COL_INDEX = 0
+VIDEO_COL_CREATED = 1
+VIDEO_COL_TITLE = 2
+VIDEO_COL_LINK = 3
+VIDEO_COL_VIEWS = 4
+
+SORT_OPTIONS = [
+    ("Mới nhất trước", "newest"),
+    ("Cũ nhất trước", "oldest"),
+    ("View cao nhất", "views_desc"),
+    ("View thấp nhất", "views_asc"),
+    ("STT tăng dần", "index"),
+]
+
+
+def _format_number(value: Any) -> str:
+    if value is None or value == "" or value == "N/A":
+        return "N/A"
+    try:
+        return f"{int(float(value)):,}"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 class PageDetailDialog(QtWidgets.QDialog):
     details_ready = QtCore.pyqtSignal(dict)
     details_error = QtCore.pyqtSignal(str)
+    videos_ready = QtCore.pyqtSignal(list)
+    page_stats_ready = QtCore.pyqtSignal(dict)
 
     def __init__(
         self,
@@ -21,10 +48,11 @@ class PageDetailDialog(QtWidgets.QDialog):
         self._overlay: Optional[QtWidgets.QWidget] = None
         self._overlay_label: Optional[QtWidgets.QLabel] = None
         self._presenter = None
+        self._videos: List[Dict[str, Any]] = []
 
         self.setWindowTitle(f"Chi tiết Page: {page_name}")
-        self.resize(800, 650)
-        self.setMinimumSize(700, 500)
+        self.resize(1000, 720)
+        self.setMinimumSize(820, 560)
         self.setStyleSheet(
             """
             * { font-family: "Nunito"; font-size: 9pt; }
@@ -37,11 +65,14 @@ class PageDetailDialog(QtWidgets.QDialog):
             QPushButton { background: #0284c7; color: #ffffff; border: 1px solid #0284c7; border-radius: 8px; padding: 8px 14px; font-weight: 800; }
             QPushButton:hover { background: #0ea5e9; }
             QPushButton:disabled { background: #e2e8f0; border-color: #cbd5e1; color: #64748b; }
+            QComboBox { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 3px 6px; }
             """
         )
         self._build_ui()
         self.details_ready.connect(self._on_details_ready)
         self.details_error.connect(self._on_details_error)
+        self.videos_ready.connect(self.populate_videos)
+        self.page_stats_ready.connect(self.populate_overview)
 
     def set_presenter(self, presenter: Any) -> None:
         self._presenter = presenter
@@ -93,28 +124,81 @@ class PageDetailDialog(QtWidgets.QDialog):
         for field_name, display_name in [
             ("followers_count", "Followers"), ("fan_count", "Fan count"),
             ("likes_count", "Likes"), ("talking_about_count", "Talking About"),
-            ("were_here_count", "Were Here"), ("overall_star_rating", "Đánh giá"),
-            ("rating_count", "Số đánh giá"),
         ]:
             lbl = QtWidgets.QLabel("N/A")
             lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
             counts_layout.addRow(f"{display_name}:", lbl)
             self.labels[field_name] = lbl
+
+        # Số liệu chính: số video trên page / tổng view / follow (đồng bộ tab Thống kê)
+        for field_name, display_name in [
+            ("page_video_count", "Số video trên page"),
+            ("video_views", "Tổng view video"),
+        ]:
+            overview = QtWidgets.QLabel("N/A")
+            overview.setStyleSheet("color: #0f172a; font-weight: 800;")
+            overview.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            self.labels[field_name] = overview
+            counts_layout.addRow(f"{display_name}:", overview)
+
+        self.updated_at_label = QtWidgets.QLabel("Cập nhật lúc: N/A")
+        self.updated_at_label.setStyleSheet("color: #64748b; font-weight: 650;")
+        counts_layout.addRow("", self.updated_at_label)
+        self.stats_btn = QtWidgets.QPushButton("Cập nhật số liệu")
+        self.stats_btn.clicked.connect(self._on_stats_clicked)
+        self.stats_btn.setMaximumWidth(160)
+        stats_row = QtWidgets.QHBoxLayout()
+        stats_row.addWidget(self.stats_btn)
+        stats_row.addStretch(1)
+        counts_layout.addRow("", self._wrap(stats_row))
         info_splitter.addWidget(counts_group)
         info_splitter.setStretchFactor(0, 3)
         info_splitter.setStretchFactor(1, 2)
+        info_splitter.setMaximumHeight(320)
         layout.addWidget(info_splitter)
 
-        history_group = QtWidgets.QGroupBox("Lịch sử cập nhật")
-        history_layout = QtWidgets.QVBoxLayout(history_group)
-        self.history_table = QtWidgets.QTableWidget(0, 6)
-        self.history_table.setHorizontalHeaderLabels(["Thời gian", "Followers", "Likes", "Talking", "Were Here", "Đánh giá"])
-        self.history_table.setAlternatingRowColors(True)
-        self.history_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.history_table.horizontalHeader().setStretchLastSection(True)
-        self.history_table.setMaximumHeight(200)
-        history_layout.addWidget(self.history_table)
-        layout.addWidget(history_group)
+        # ── Danh sách video của page (thay cho "Lịch sử cập nhật") ──
+        video_group = QtWidgets.QGroupBox("Danh sách video của page")
+        video_layout = QtWidgets.QVBoxLayout(video_group)
+        video_layout.setSpacing(6)
+
+        filter_row = QtWidgets.QHBoxLayout()
+        filter_row.addWidget(QtWidgets.QLabel("Lọc:"))
+        self.video_filter_input = QtWidgets.QLineEdit()
+        self.video_filter_input.setPlaceholderText("Nội dung, ID hoặc link video…")
+        self.video_filter_input.textChanged.connect(self._apply_video_view)
+        filter_row.addWidget(self.video_filter_input, 1)
+        filter_row.addWidget(QtWidgets.QLabel("Sắp xếp:"))
+        self.video_sort_combo = QtWidgets.QComboBox()
+        for label, key in SORT_OPTIONS:
+            self.video_sort_combo.addItem(label, key)
+        self.video_sort_combo.currentIndexChanged.connect(self._apply_video_view)
+        filter_row.addWidget(self.video_sort_combo)
+        self.video_count_label = QtWidgets.QLabel("Tổng: 0 video")
+        self.video_count_label.setStyleSheet("color: #0284c7; font-weight: 800;")
+        filter_row.addWidget(self.video_count_label)
+        self.video_refresh_btn = QtWidgets.QPushButton("Tải lại danh sách")
+        self.video_refresh_btn.clicked.connect(self._on_videos_clicked)
+        filter_row.addWidget(self.video_refresh_btn)
+        video_layout.addLayout(filter_row)
+
+        self.video_table = QtWidgets.QTableWidget(0, len(VIDEO_HEADERS))
+        self.video_table.setHorizontalHeaderLabels(VIDEO_HEADERS)
+        self.video_table.setAlternatingRowColors(True)
+        self.video_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.video_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.video_table.verticalHeader().setVisible(False)
+        self.video_table.verticalHeader().setDefaultSectionSize(26)
+        self.video_table.setSortingEnabled(False)
+        vheader = self.video_table.horizontalHeader()
+        vheader.setSectionResizeMode(VIDEO_COL_TITLE, QtWidgets.QHeaderView.Stretch)
+        self.video_table.setColumnWidth(VIDEO_COL_INDEX, 52)
+        self.video_table.setColumnWidth(VIDEO_COL_CREATED, 140)
+        self.video_table.setColumnWidth(VIDEO_COL_LINK, 230)
+        self.video_table.setColumnWidth(VIDEO_COL_VIEWS, 100)
+        self.video_table.cellDoubleClicked.connect(self._on_video_cell_double_clicked)
+        video_layout.addWidget(self.video_table)
+        layout.addWidget(video_group, 1)
 
         close_btn = QtWidgets.QPushButton("Đóng")
         close_btn.clicked.connect(self.accept)
@@ -124,9 +208,35 @@ class PageDetailDialog(QtWidgets.QDialog):
         close_layout.addWidget(close_btn)
         layout.addLayout(close_layout)
 
+    @staticmethod
+    def _wrap(layout: QtWidgets.QHBoxLayout) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        widget.setLayout(layout)
+        return widget
+
+    # ── Nút ───────────────────────────────────────────────────────
     def _on_refresh_clicked(self) -> None:
         if self._presenter:
             self._presenter.refresh(self.page_id, self.page_name, self.access_token)
+
+    def _on_videos_clicked(self) -> None:
+        if self._presenter:
+            self._presenter.load_videos()
+
+    def _on_stats_clicked(self) -> None:
+        if self._presenter:
+            self._presenter.refresh_stats()
+
+    def _on_video_cell_double_clicked(self, row: int, col: int) -> None:
+        if col != VIDEO_COL_LINK:
+            return
+        item = self.video_table.item(row, VIDEO_COL_LINK)
+        link = item.text().strip() if item is not None else ""
+        if not link:
+            item = self.video_table.item(row, VIDEO_COL_TITLE)
+            link = item.text().strip() if item is not None else ""
+        if link.startswith("http"):
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl(link))
 
     # ── Nhận kết quả từ luồng nền qua signal (an toàn luồng) ──────
     def _on_details_ready(self, data: Dict[str, Any]) -> None:
@@ -136,8 +246,6 @@ class PageDetailDialog(QtWidgets.QDialog):
         if data:
             self.populate_info(data)
         self._show_field_errors(data)
-        if self._presenter:
-            self._presenter.load_history(self.page_id)
 
     def _on_details_error(self, message: str) -> None:
         self.hide_overlay()
@@ -193,37 +301,105 @@ class PageDetailDialog(QtWidgets.QDialog):
                 return f"{value:,}"
             return str(value)
 
-        for key in ["followers_count", "fan_count", "likes_count", "talking_about_count", "were_here_count", "overall_star_rating", "rating_count"]:
+        for key in ["followers_count", "fan_count", "likes_count", "talking_about_count"]:
             if key in self.labels:
                 self.labels[key].setText(_fmt(data.get(key)))
 
-    def populate_history(self, history: List[Dict[str, Any]]) -> None:
-        self.history_table.setRowCount(0)
-        for row_data in history:
-            row_idx = self.history_table.rowCount()
-            self.history_table.insertRow(row_idx)
-            fetched_at = str(row_data.get("fetched_at", ""))[:19].replace("T", " ")
-            def _safe_int(val: Any) -> str:
-                if val is None:
-                    return "N/A"
-                try:
-                    return f"{int(val):,}"
-                except (ValueError, TypeError):
-                    return str(val)
-            def _safe_float(val: Any) -> str:
-                if val is None:
-                    return "N/A"
-                try:
-                    return f"{float(val):.1f}"
-                except (ValueError, TypeError):
-                    return str(val)
-            values = [
-                fetched_at, _safe_int(row_data.get("followers_count")),
-                _safe_int(row_data.get("likes_count")), _safe_int(row_data.get("talking_about_count")),
-                _safe_int(row_data.get("were_here_count")), _safe_float(row_data.get("overall_star_rating")),
-            ]
-            for col_idx, value in enumerate(values):
-                self.history_table.setItem(row_idx, col_idx, QtWidgets.QTableWidgetItem(value))
+    def populate_overview(self, stats: Dict[str, Any]) -> None:
+        """Số video / tổng view / follow của page (cùng nguồn số liệu với tab Thống kê)."""
+        if not isinstance(stats, dict):
+            return
+        video_count = stats.get("page_video_count", stats.get("video_count"))
+        video_views = stats.get("video_views", stats.get("views"))
+        followers = stats.get("followers", stats.get("followers_count"))
+        fan_count = stats.get("fan_count")
+        for key, value in (
+            ("page_video_count", _format_number(video_count)),
+            ("video_views", _format_number(video_views)),
+            ("followers_count", _format_number(followers)),
+            ("fan_count", _format_number(fan_count)),
+        ):
+            label = self.labels.get(key)
+            if label is not None:
+                label.setText(value)
+        updated = str(stats.get("updated_at") or "").strip()
+        self.updated_at_label.setText(f"Cập nhật lúc: {updated or 'N/A'}")
+
+    def populate_videos(self, videos: List[Dict[str, Any]]) -> None:
+        self._videos = list(videos or [])
+        self._apply_video_view()
+
+    # ── Lọc + sắp xếp + đánh số thứ tự ───────────────────────────
+    def _apply_video_view(self) -> None:
+        keyword = self.video_filter_input.text().strip().lower()
+        rows = list(self._videos)
+
+        if keyword:
+            def matches(video: Dict[str, Any]) -> bool:
+                haystack = " ".join([
+                    str(video.get("title") or ""),
+                    str(video.get("id") or ""),
+                    str(video.get("link") or ""),
+                ]).lower()
+                return keyword in haystack
+
+            rows = [v for v in rows if matches(v)]
+
+        sort_key = self.video_sort_combo.currentData() or "newest"
+        if sort_key == "newest":
+            rows.sort(key=lambda v: str(v.get("created_time") or ""), reverse=True)
+        elif sort_key == "oldest":
+            rows.sort(key=lambda v: str(v.get("created_time") or ""))
+        elif sort_key == "views_desc":
+            rows.sort(key=lambda v: (v.get("views") if isinstance(v.get("views"), int) else -1), reverse=True)
+        elif sort_key == "views_asc":
+            rows.sort(key=lambda v: (v.get("views") if isinstance(v.get("views"), int) else 10**12))
+        # "index": giữ nguyên thứ tự Facebook trả về
+
+        self.video_table.setRowCount(0)
+        for position, video in enumerate(rows, start=1):
+            row_idx = self.video_table.rowCount()
+            self.video_table.insertRow(row_idx)
+
+            index_item = QtWidgets.QTableWidgetItem(str(position))
+            index_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            index_item.setData(QtCore.Qt.UserRole, str(video.get("id") or ""))
+            self.video_table.setItem(row_idx, VIDEO_COL_INDEX, index_item)
+
+            created = str(video.get("created_time") or "")
+            self.video_table.setItem(row_idx, VIDEO_COL_CREATED, QtWidgets.QTableWidgetItem(
+                created[:19].replace("T", " ") if created else "N/A"))
+
+            title_item = QtWidgets.QTableWidgetItem(str(video.get("title") or "N/A"))
+            title_item.setToolTip(str(video.get("title") or ""))
+            self.video_table.setItem(row_idx, VIDEO_COL_TITLE, title_item)
+
+            link = str(video.get("link") or "")
+            link_item = QtWidgets.QTableWidgetItem(link or "N/A")
+            if link:
+                link_item.setForeground(QtGui.QColor("#0284c7"))
+                link_item.setToolTip(f"Nhấp đôi để mở:\n{link}")
+            self.video_table.setItem(row_idx, VIDEO_COL_LINK, link_item)
+
+            views = video.get("views")
+            views_item = QtWidgets.QTableWidgetItem(_format_number(views))
+            views_item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            if isinstance(views, int):
+                views_item.setForeground(QtGui.QColor("#15803d"))
+            else:
+                views_item.setForeground(QtGui.QColor("#94a3b8"))
+            self.video_table.setItem(row_idx, VIDEO_COL_VIEWS, views_item)
+
+            self.video_table.setRowHeight(row_idx, 26)
+
+        total = len(self._videos)
+        if keyword or sort_key != "newest":
+            self.video_count_label.setText(
+                f"Hiện {len(rows)}/{total} video"
+                + (f" (lọc: \"{self.video_filter_input.text().strip()}\")" if keyword else "")
+            )
+        else:
+            self.video_count_label.setText(f"Tổng: {total} video")
 
     def show_overlay(self, text: str = "Đang xử lý...") -> None:
         if self._overlay is None:
@@ -253,6 +429,20 @@ class PageDetailDialog(QtWidgets.QDialog):
 
     def set_refresh_enabled(self, enabled: bool) -> None:
         self.refresh_btn.setEnabled(enabled)
+        self.stats_btn.setEnabled(enabled)
+        self.video_refresh_btn.setEnabled(enabled)
+
+    def set_videos_loading(self, loading: bool) -> None:
+        self.video_refresh_btn.setEnabled(not loading)
+        self.video_refresh_btn.setText("Đang tải video..." if loading else "Tải lại danh sách")
+        if loading:
+            self.video_count_label.setText("Đang tải danh sách video...")
+
+    def set_stats_loading(self, loading: bool) -> None:
+        self.stats_btn.setEnabled(not loading)
+        self.stats_btn.setText("Đang cập nhật..." if loading else "Cập nhật số liệu")
+        if loading:
+            self.updated_at_label.setText("Đang cập nhật số liệu...")
 
     def set_refresh_text(self, text: str) -> None:
         self.refresh_btn.setText(text)

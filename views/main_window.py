@@ -19,7 +19,8 @@ from views.widgets import (
     PAGE_COL_ID,
     PAGE_COL_OPEN,
     PAGE_COL_ACCESS_TOKEN,
-    PAGE_COL_INFO,
+    PAGE_COL_FOLLOWERS,
+    PAGE_COL_VIEWS,
 )
 from views.log_tab import LogTab
 from views.recent_posts_tab import RecentPostsTab
@@ -101,6 +102,8 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.trial_status_label.setStyleSheet("background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 10px; color: #334155; font-weight: 800;")
 
         self._last_applied_comment = ""
+        # Số liệu Followers/View đồng bộ từ tab Thống kê (khoá = tên page).
+        self._page_stat_map: Dict[str, Dict[str, Any]] = {}
 
         self._build_ui()
         self.config_status_changed.connect(self._apply_config_status)
@@ -202,7 +205,8 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.page_table.setColumnWidth(PAGE_COL_ID, 170)
         self.page_table.setColumnWidth(PAGE_COL_OPEN, 74)
         self.page_table.setColumnWidth(PAGE_COL_ACCESS_TOKEN, 170)
-        self.page_table.setColumnWidth(PAGE_COL_INFO, 120)
+        self.page_table.setColumnWidth(PAGE_COL_FOLLOWERS, 100)
+        self.page_table.setColumnWidth(PAGE_COL_VIEWS, 110)
         self.page_table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.page_table.cellDoubleClicked.connect(self._on_page_double_clicked)
         self.page_table.cellClicked.connect(self._on_page_cell_clicked)
@@ -362,6 +366,9 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
     def _build_stats_tab(self) -> None:
         self.stats_tab = StatsTab()
         self.stats_tab.set_callbacks(self._on_refresh_stats_all, self._on_refresh_stats_selected)
+        # Số liệu mới ở tab Thống kê -> cột Followers/View của bảng page.
+        self.stats_tab.stats_ready.connect(self.sync_page_stats_from_stats_tab)
+        self.stats_tab.stats_progress.connect(self.sync_page_stats_from_stats_tab)
         self.tabs.addTab(self.stats_tab, "Thống kê")
 
     def _build_system_tabs(self) -> None:
@@ -695,6 +702,9 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
             rows = self._container.stats_service.local_rows(pages)
             self.stats_tab.load_rows(rows)
             self.stats_tab.set_status(f"{len(rows)} page")
+            # Số liệu đã lưu cũng phải hiện ở bảng page ngay khi mở app.
+            self._reload_page_stat_map()
+            self.sync_page_stats_from_stats_tab(rows)
         except Exception:
             pass
 
@@ -817,10 +827,25 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         from presenters.page_detail_presenter import PageDetailPresenter
 
         dialog = PageDetailDialog(page_id, page_name, access_token, self)
-        presenter = PageDetailPresenter(view=dialog, page_detail_service=self._container.page_detail_service)
+        presenter = PageDetailPresenter(
+            view=dialog,
+            page_detail_service=self._container.page_detail_service,
+            stats_service=self._container.stats_service,
+        )
         dialog.set_presenter(presenter)
-        presenter.load_data(page_id, page_name, access_token)
+        presenter.load_data(page_id, page_name, access_token, self._page_stat_for_dialog(page_id, page_name))
         dialog.exec_()
+
+    def _page_stat_for_dialog(self, page_id: str, page_name: str) -> Dict[str, Any]:
+        """Số liệu đã có trong bảng page để dialog mở ra là hiển thị ngay, không phải chờ mạng."""
+        stat = self._lookup_page_stat({"id": page_id, "name": page_name})
+        return {
+            "page_video_count": stat.get("video_count"),
+            "video_views": stat.get("video_views"),
+            "followers": stat.get("followers_count"),
+            "fan_count": stat.get("fan_count"),
+            "updated_at": str(stat.get("updated_at") or "")[:19].replace("T", " "),
+        }
 
     def _choose_videos_for_pages(self, pages: List[Dict[str, Any]]) -> None:
         from services.config_service import VIDEO_EXTENSIONS
@@ -1019,7 +1044,8 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
             open_item.setTextAlignment(QtCore.Qt.AlignCenter)
             self.page_table.setItem(row, PAGE_COL_OPEN, open_item)
             self.page_table.setItem(row, PAGE_COL_ACCESS_TOKEN, QtWidgets.QTableWidgetItem(page.get("access_token", "")))
-            self.page_table.setItem(row, PAGE_COL_INFO, QtWidgets.QTableWidgetItem("N/A"))
+            # Followers / View lấy đúng số liệu đang hiển thị ở tab Thống kê.
+            self._paint_page_stat_cells(row, page)
         self.page_table.blockSignals(False)
 
     def update_pagination(self, current: int, total: int) -> None:
@@ -1030,20 +1056,95 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
     def update_selection_summary(self, selected: int, total: int) -> None:
         self.page_selection_summary_label.setText(f"Đã chọn {selected}/{total} page")
 
-    def update_page_info(self, page_id: str, info: Dict[str, Any]) -> None:
+    # ── Followers / View: đồng bộ với tab Thống kê ────────────────
+    def _reload_page_stat_map(self) -> None:
+        try:
+            self._page_stat_map = self._container.stats_service.stat_map()
+        except Exception:
+            self._page_stat_map = {}
+
+    def _lookup_page_stat(self, page: Dict[str, Any]) -> Dict[str, Any]:
+        """Tìm số liệu đã lưu: ưu tiên theo tên page (khoá của page_stats), rồi theo id."""
+        if not self._page_stat_map:
+            self._reload_page_stat_map()
+        name = str(page.get("name") or "").strip()
+        if name and name in self._page_stat_map:
+            return self._page_stat_map[name]
+        page_id = str(page.get("id") or "").strip()
+        if page_id and page_id in self._page_stat_map:
+            return self._page_stat_map[page_id]
+        return {}
+
+    @staticmethod
+    def _format_stat(value: Any) -> str:
+        if value is None or value == "" or value == "N/A":
+            return "N/A"
+        try:
+            return f"{int(float(value)):,}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _paint_page_stat_cells(self, row: int, page: Dict[str, Any]) -> None:
+        stat = self._lookup_page_stat(page)
+        followers = self._format_stat(stat.get("followers_count", stat.get("followers")))
+        views = self._format_stat(stat.get("video_views", stat.get("views")))
+        updated = str(stat.get("updated_at") or "")[:19].replace("T", " ")
+        for col, value, tooltip in (
+            (PAGE_COL_FOLLOWERS, followers, f"Followers (fan): {followers}"),
+            (PAGE_COL_VIEWS, views, f"View video: {views}"),
+        ):
+            item = self.page_table.item(row, col)
+            if item is None:
+                item = QtWidgets.QTableWidgetItem("")
+                self.page_table.setItem(row, col, item)
+            item.setText(value)
+            item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            item.setForeground(QtGui.QColor("#0f172a" if value != "N/A" else "#94a3b8"))
+            item.setToolTip(f"{tooltip}\nCập nhật lúc: {updated}" if updated else tooltip)
+
+    def sync_page_stats_from_stats_tab(self, rows: Any) -> None:
+        """Tab Thống kê có số liệu mới -> đẩy sang cột Followers/View của bảng page."""
+        if isinstance(rows, dict):
+            rows = [rows]
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("page") or row.get("page_key") or "").strip()
+            if not name:
+                continue
+            self._page_stat_map[name] = {
+                "page_key": name,
+                "page_name": name,
+                "followers_count": row.get("followers"),
+                "fan_count": row.get("fan_count"),
+                "video_views": row.get("video_views"),
+                "video_count": row.get("page_video_count"),
+                "updated_at": row.get("updated_at"),
+            }
+        if not self._page_stat_map:
+            self._reload_page_stat_map()
         for row in range(self.page_table.rowCount()):
-            item = self.page_table.item(row, PAGE_COL_ID)
-            if item and item.text() == page_id:
-                display = f"{info.get('followers', 'N/A')} / {info.get('views', 'N/A')}"
-                cell = self.page_table.item(row, PAGE_COL_INFO)
-                if cell is None:
-                    cell = QtWidgets.QTableWidgetItem(display)
-                    self.page_table.setItem(row, PAGE_COL_INFO, cell)
-                else:
-                    cell.setText(display)
-                if info.get("followers") not in (None, "N/A"):
-                    cell.setForeground(QtGui.QColor("#22c55e"))
-                return
+            key = self._page_row_key(row)
+            page = self._presenter.page_list.get_page_by_key(key) or {}
+            if page:
+                self._paint_page_stat_cells(row, page)
+
+    def update_page_info(self, page_id: str, info: Dict[str, Any]) -> None:
+        """Cập nhật nhanh 1 page từ luồng nền (giữ tương thích IPageListView)."""
+        entry = self._page_stat_map.setdefault(str(page_id), {})
+        if info.get("followers") not in (None, "", "N/A"):
+            entry["followers_count"] = info["followers"]
+        if info.get("views") not in (None, "", "N/A"):
+            entry["video_views"] = info["views"]
+        for row in range(self.page_table.rowCount()):
+            if self._page_cell_text(row, PAGE_COL_ID) != str(page_id):
+                continue
+            key = self._page_row_key(row)
+            page = self._presenter.page_list.get_page_by_key(key) or {"id": page_id}
+            if not page:
+                page = {"id": page_id, "name": self._page_cell_text(row, PAGE_COL_NAME)}
+            self._paint_page_stat_cells(row, page)
+            return
 
     def _post_status_style(self, status: str):
         """Tra về (mau_chu, mau_nen) cho trạng thái đăng; không khớp thì màu xám."""

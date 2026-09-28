@@ -12,11 +12,13 @@ PAGE_COL_ACCOUNT = 5
 PAGE_COL_ID = 6
 PAGE_COL_OPEN = 7
 PAGE_COL_ACCESS_TOKEN = 8
-PAGE_COL_INFO = 9
+PAGE_COL_FOLLOWERS = 9
+PAGE_COL_VIEWS = 10
 
 PAGE_HEADERS = [
     "Chọn", "STT", "Tên Page", "Trạng thái token", "Trạng thái đăng",
-    "Tài khoản", "Page ID", "Open trang", "Page Access Token", "Follow/View",
+    "Tài khoản", "Page ID", "Open trang", "Page Access Token",
+    "Followers", "View video",
 ]
 
 

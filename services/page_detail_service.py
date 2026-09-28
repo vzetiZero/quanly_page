@@ -1,6 +1,6 @@
 import logging
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 from di.interfaces import IPageDetailRepository, IPageDetailFetcher
 
@@ -14,9 +14,6 @@ class PageDetailService:
 
     def load_latest(self, page_id: str) -> Optional[Dict[str, Any]]:
         return self._repo.load_latest_page_detail(page_id)
-
-    def load_history(self, page_id: str, limit: int = 10) -> List[Dict[str, Any]]:
-        return self._repo.load_page_details_history(page_id, limit)
 
     def refresh(self, page_id: str, page_name: str, access_token: str) -> Dict[str, Any]:
         details = self._fetcher.fetch_all(page_id, page_name, access_token)
