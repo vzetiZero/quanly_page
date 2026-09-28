@@ -49,6 +49,7 @@ class Container:
         self.page_service = PageService(
             page_repo=self.db,
             token_repo=self.db,
+            base_url=base_url,
         )
         self.post_service = PostService(
             post_repo=self.db,

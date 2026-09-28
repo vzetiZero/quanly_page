@@ -26,18 +26,11 @@ class PageDetailPresenter:
         self._view.set_refresh_text("Đang cập nhật...")
 
         def on_complete(data: dict) -> None:
-            self._view.hide_overlay()
-            self._view.set_refresh_enabled(True)
-            self._view.set_refresh_text("Cập nhật")
-            if data:
-                self._view.populate_info(data)
-            self._view.populate_history(self._service.load_history(page_id))
+            # Phát tín hiệu để UI cập nhật ở luồng chính (an toàn luồng).
+            self._view.details_ready.emit(data or {})
 
         def on_error(message: str) -> None:
-            self._view.hide_overlay()
-            self._view.set_refresh_enabled(True)
-            self._view.set_refresh_text("Cập nhật")
-            self._view.show_error(f"Không thể cập nhật: {message}")
+            self._view.details_error.emit(message)
 
         self._service.refresh_async(page_id, page_name, access_token, on_complete, on_error)
 

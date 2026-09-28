@@ -543,11 +543,11 @@ class DataExporter:
             handle.write("=" * 80 + "\n")
             handle.write("HOW TO USE THESE TOKENS\n")
             handle.write("=" * 80 + "\n\n")
-            handle.write("1. POST TEXT: POST https://graph.facebook.com/v23.0/{page_id}/feed\n")
+            handle.write("1. POST TEXT: POST https://graph.facebook.com/v25.0/{page_id}/feed\n")
             handle.write("   Params: access_token={token}&message=Your message\n\n")
-            handle.write("2. POST PHOTO: POST https://graph.facebook.com/v23.0/{page_id}/photos\n")
+            handle.write("2. POST PHOTO: POST https://graph.facebook.com/v25.0/{page_id}/photos\n")
             handle.write("   Params: access_token={token}&caption=Caption\n\n")
-            handle.write("3. POST REELS: POST https://graph.facebook.com/v23.0/{page_id}/video_reels\n")
+            handle.write("3. POST REELS: POST https://graph.facebook.com/v25.0/{page_id}/video_reels\n")
             handle.write("   Params: access_token={token}&title=Title&description=Description\n")
             handle.write("4. IMPORTANT: page access token needs publish permissions for posts and reels.\n")
 
@@ -562,7 +562,7 @@ class DataExporter:
 
 ## 1. Cấu hình environment variables
 - FACEBOOK_ACCESS_TOKEN: User access token hoặc app token đủ quyền.
-- FB_API_VERSION: default v23.0.
+- FB_API_VERSION: default v25.0.
 - OUTPUT_DIR: thư mục xuất file kết quả.
 
 ## 2. Thu thập Pages

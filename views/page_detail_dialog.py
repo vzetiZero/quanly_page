@@ -4,6 +4,9 @@ from PyQt5 import QtCore, QtWidgets
 
 
 class PageDetailDialog(QtWidgets.QDialog):
+    details_ready = QtCore.pyqtSignal(dict)
+    details_error = QtCore.pyqtSignal(str)
+
     def __init__(
         self,
         page_id: str,
@@ -37,6 +40,8 @@ class PageDetailDialog(QtWidgets.QDialog):
             """
         )
         self._build_ui()
+        self.details_ready.connect(self._on_details_ready)
+        self.details_error.connect(self._on_details_error)
 
     def set_presenter(self, presenter: Any) -> None:
         self._presenter = presenter
@@ -56,6 +61,12 @@ class PageDetailDialog(QtWidgets.QDialog):
         self.refresh_btn.setMinimumWidth(120)
         header.addWidget(self.refresh_btn)
         layout.addLayout(header)
+
+        self.warning_label = QtWidgets.QLabel("")
+        self.warning_label.setWordWrap(True)
+        self.warning_label.setStyleSheet("color: #b91c1c; font-weight: 700;")
+        self.warning_label.setVisible(False)
+        layout.addWidget(self.warning_label)
 
         info_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
 
@@ -116,6 +127,37 @@ class PageDetailDialog(QtWidgets.QDialog):
     def _on_refresh_clicked(self) -> None:
         if self._presenter:
             self._presenter.refresh(self.page_id, self.page_name, self.access_token)
+
+    # ── Nhận kết quả từ luồng nền qua signal (an toàn luồng) ──────
+    def _on_details_ready(self, data: Dict[str, Any]) -> None:
+        self.hide_overlay()
+        self.set_refresh_enabled(True)
+        self.set_refresh_text("Cập nhật")
+        if data:
+            self.populate_info(data)
+        self._show_field_errors(data)
+        if self._presenter:
+            self._presenter.load_history(self.page_id)
+
+    def _on_details_error(self, message: str) -> None:
+        self.hide_overlay()
+        self.set_refresh_enabled(True)
+        self.set_refresh_text("Cập nhật")
+        self.show_error(f"Không thể cập nhật: {message}")
+
+    def _show_field_errors(self, data: Dict[str, Any]) -> None:
+        errors = data.get("_errors") if isinstance(data, dict) else None
+        if not errors:
+            self.warning_label.setText("")
+            self.warning_label.setVisible(False)
+            return
+        parts = []
+        for item in errors[:8]:
+            field = item.get("field", "")
+            message = item.get("message", "")
+            parts.append(f"{field} ({message})" if message else field)
+        self.warning_label.setText("Không lấy được một số trường: " + "; ".join(parts))
+        self.warning_label.setVisible(True)
 
     # ── IPageDetailView interface implementation ──────────────────
 

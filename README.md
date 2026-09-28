@@ -1,7 +1,7 @@
 # Facebook Page Collector & Poster
 
 Project này hỗ trợ:
-- Thu thập Business Manager và Pages từ Facebook Graph API v23.0
+- Thu thập Business Manager và Pages từ Facebook Graph API v25.0
 - Trích xuất Page Access Token cho từng Page
 - Fallback từ me/accounts nếu không thấy trong BM
 - Xuất kết quả sang TXT và JSON
@@ -21,7 +21,7 @@ Tạo hoặc chỉnh sửa file .env với nội dung:
 ```env
 FACEBOOK_ACCESS_TOKEN=your_user_access_token
 FACEBOOK_PAGE_ACCESS_TOKEN=your_page_access_token
-FB_API_VERSION=v23.0
+FB_API_VERSION=v25.0
 REQUEST_TIMEOUT=30
 MAX_RETRIES=3
 RETRY_DELAY=2

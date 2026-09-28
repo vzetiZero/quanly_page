@@ -1,20 +1,31 @@
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Tuple
 
 import requests
 
 logger = logging.getLogger("facebook_ui")
 
-PAGE_DETAIL_FIELDS = ",".join([
+# Field còn hợp lệ trên Page (Graph API hiện hành).
+PAGE_BASIC_FIELDS = [
     "id", "name", "category", "about", "description", "phone", "website",
-    "location", "emails", "fan_count", "followers_count", "talking_about_count",
-    "were_here_count", "overall_star_rating", "rating_count",
-    "cover", "verification_status", "is_published", "link", "created_time",
-    "instagram_business_account", "engagement",
-])
+    "link", "verification_status", "is_published", "created_time",
+    "cover", "emails", "location", "instagram_business_account",
+]
+# Field đếm cần Page Access Token + pages_read_engagement.
+PAGE_COUNT_FIELDS = ["fan_count", "followers_count", "talking_about_count", "new_like_count"]
 
-PAGE_INSIGHT_FIELDS = "page_views_total,page_impressions,page_engaged_users,page_post_impressions_total"
+# Các field Meta đã BỎ (nếu đưa vào 1 request sẽ làm hỏng cả request) -> không request.
+PAGE_REMOVED_FIELDS = ["overall_star_rating", "rating_count", "were_here_count", "engagement"]
+
+# Metric insights còn dùng được; sẽ thử từng metric để 1 metric hỏng không kéo theo tất cả.
+PAGE_INSIGHT_METRICS = [
+    "page_impressions",
+    "page_impressions_unique",
+    "page_engaged_users",
+    "page_post_engagements",
+    "page_fans",
+]
 
 
 class PageDetailFetcher:
@@ -22,59 +33,97 @@ class PageDetailFetcher:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def fetch_page_info(self, page_id: str, access_token: str) -> Dict[str, Any]:
-        BASIC_FIELDS = "id,name,category,about,phone,website,link,verification_status,is_published"
+    # ── Helpers ───────────────────────────────────────────────────
+    @staticmethod
+    def _extract_error(payload: Any) -> Dict[str, Any]:
+        if isinstance(payload, dict):
+            error = payload.get("error") or {}
+            if isinstance(error, dict):
+                return {
+                    "message": error.get("message", ""),
+                    "code": error.get("code"),
+                    "subcode": error.get("error_subcode"),
+                    "type": error.get("type"),
+                }
+        return {"message": str(payload)[:200]}
 
+    def _get(self, path: str, params: Dict[str, Any]) -> Tuple[Any, Any]:
         try:
-            response = requests.get(
-                f"{self.base_url}/{page_id}",
-                params={"access_token": access_token, "fields": BASIC_FIELDS},
-                timeout=self.timeout,
-            )
-            if response.status_code >= 400:
-                logger.warning("Page info basic request failed for %s: %s", page_id, response.status_code)
-                return {"page_id": page_id, "page_name": "", "fetched_at": datetime.now().isoformat()}
-            data = response.json()
-            result = self._parse_page_info(data)
+            response = requests.get(f"{self.base_url}{path}", params=params, timeout=self.timeout)
         except Exception as exc:
-            logger.warning("Không thể lấy page info cơ bản cho %s: %s", page_id, exc)
-            return {"page_id": page_id, "page_name": "", "fetched_at": datetime.now().isoformat()}
-
-        EXTRA_FIELDS = "followers_count,fan_count,talking_about_count,were_here_count,overall_star_rating,rating_count,location,emails,cover,instagram_business_account,engagement"
+            return None, {"message": str(exc)}
         try:
-            response = requests.get(
-                f"{self.base_url}/{page_id}",
-                params={"access_token": access_token, "fields": EXTRA_FIELDS},
-                timeout=self.timeout,
-            )
-            if response.status_code < 400:
-                extra_data = response.json()
-                result.update(self._parse_page_info(extra_data))
-        except Exception:
-            pass
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        if response.status_code >= 400:
+            return None, self._extract_error(payload)
+        return payload, None
 
+    def _fetch_fields(self, page_id: str, access_token: str, fields: List[str]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        """Lấy cả nhóm field; nếu lỗi (do field đã bị bỏ) thì lấy từng field để giữ lại cái hợp lệ."""
+        fields = [f for f in fields if f]
+        merged: Dict[str, Any] = {}
+        errors: List[Dict[str, Any]] = []
+        if not fields:
+            return merged, errors
+
+        payload, error = self._get(f"/{page_id}", {"access_token": access_token, "fields": ",".join(fields)})
+        if error is None:
+            return payload or {}, errors
+
+        for field in fields:
+            payload, error = self._get(f"/{page_id}", {"access_token": access_token, "fields": field})
+            if error is None:
+                merged.update(payload or {})
+            else:
+                errors.append({"field": field, "message": error.get("message", ""), "code": error.get("code")})
+        return merged, errors
+
+    # ── Public ────────────────────────────────────────────────────
+    def fetch_page_info(self, page_id: str, access_token: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "page_id": page_id,
+            "page_name": "",
+            "fetched_at": datetime.now().isoformat(),
+        }
+        errors: List[Dict[str, Any]] = []
+
+        basic_raw, basic_errors = self._fetch_fields(page_id, access_token, PAGE_BASIC_FIELDS)
+        result.update(self._parse_page_info(basic_raw))
+        errors.extend(basic_errors)
+
+        count_raw, count_errors = self._fetch_fields(page_id, access_token, PAGE_COUNT_FIELDS)
+        result.update(self._parse_page_info(count_raw))
+        errors.extend(count_errors)
+
+        if errors:
+            result["_errors"] = errors
+            for item in errors:
+                logger.warning("Page field '%s' error: %s", item.get("field"), item.get("message"))
         return result
 
     def fetch_page_insights(self, page_id: str, access_token: str) -> Dict[str, Any]:
-        try:
-            response = requests.get(
-                f"{self.base_url}/{page_id}/insights",
-                params={
-                    "access_token": access_token,
-                    "metric": PAGE_INSIGHT_FIELDS,
-                    "period": "day",
-                    "limit": 7,
-                },
-                timeout=self.timeout,
+        # Thử gộp trước cho nhanh.
+        payload, error = self._get(
+            f"/{page_id}/insights",
+            {"access_token": access_token, "metric": ",".join(PAGE_INSIGHT_METRICS), "period": "day", "limit": 1},
+        )
+        if error is None:
+            return self._parse_insights(payload or {})
+
+        # Fallback: thử từng metric (bỏ qua metric bị deprecate/thiếu quyền).
+        merged: Dict[str, Any] = {}
+        for metric in PAGE_INSIGHT_METRICS:
+            payload, error = self._get(
+                f"/{page_id}/insights",
+                {"access_token": access_token, "metric": metric, "period": "day", "limit": 1},
             )
-            if response.status_code >= 400:
-                logger.warning("Insights request failed for %s: %s (có thể do thiếu quyền)", page_id, response.status_code)
-                return {}
-            data = response.json()
-            return self._parse_insights(data)
-        except Exception as exc:
-            logger.warning("Không thể lấy insights cho %s: %s", page_id, exc)
-            return {}
+            if error is None:
+                merged.update(self._parse_insights(payload or {}))
+        if not merged:
+            logger.info("Insights không lấy được cho page %s: %s", page_id, error.get("message") if error else "")
+        return merged
 
     def fetch_all(self, page_id: str, page_name: str, access_token: str) -> Dict[str, Any]:
         info = self.fetch_page_info(page_id, access_token)
@@ -82,13 +131,17 @@ class PageDetailFetcher:
 
         result: Dict[str, Any] = {
             "page_id": page_id,
-            "page_name": page_name or info.get("name", ""),
             "fetched_at": datetime.now().isoformat(),
         }
         result.update(info)
         result.update(insights)
+        # Tên page: ưu tiên tên đang hiển thị của app, nếu trống mới lấy từ API.
+        result["page_id"] = page_id
+        result["page_name"] = page_name or info.get("name") or info.get("page_name") or ""
+        result.setdefault("_errors", info.get("_errors", []))
         return result
 
+    # ── Parsers ───────────────────────────────────────────────────
     def _parse_page_info(self, data: Dict[str, Any]) -> Dict[str, Any]:
         result: Dict[str, Any] = {}
 
@@ -97,7 +150,8 @@ class PageDetailFetcher:
             if value is not None:
                 result[field] = str(value) if not isinstance(value, (int, float, bool)) else value
 
-        result["page_name"] = data.get("name", "")
+        if data.get("name") is not None:
+            result["page_name"] = data.get("name")
         result["is_published"] = data.get("is_published")
 
         location = data.get("location")
@@ -113,7 +167,7 @@ class PageDetailFetcher:
         elif isinstance(emails, str):
             result["emails"] = emails
 
-        for count_field in ("fan_count", "followers_count", "talking_about_count", "were_here_count", "rating_count"):
+        for count_field in ("fan_count", "followers_count", "talking_about_count", "new_like_count", "rating_count"):
             value = data.get(count_field)
             if value is not None:
                 try:
@@ -147,7 +201,9 @@ class PageDetailFetcher:
 
         engagement = data.get("engagement")
         if isinstance(engagement, dict):
-            result["likes_count"] = engagement.get("count")
+            count = engagement.get("count")
+            if count is not None:
+                result["likes_count"] = count
 
         return result
 

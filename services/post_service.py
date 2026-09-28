@@ -266,8 +266,9 @@ class PostService:
 
         raise RuntimeError(f"Đăng media thất bại sau {self.post_retry_count + 1} lần thử")
 
-    def post_comment_with_retries(self, page: Dict[str, Any], post_id: str, comment_text: str, comment_image_paths: Optional[List[str]] = None, proxy_config: Optional[Dict[str, str]] = None) -> None:
+    def post_comment_with_retries(self, page: Dict[str, Any], post_id: str, comment_text: str, comment_image_paths: Optional[List[str]] = None, proxy_config: Optional[Dict[str, str]] = None, base_url: Optional[str] = None) -> None:
         import requests
+        graph_base = (base_url or getattr(self._reels_uploader, "base_url", "") or "https://graph.facebook.com/v25.0").rstrip("/")
         for attempt in range(1, 4):
             try:
                 normalized_text = (comment_text or "").strip() or "Thanks!"
@@ -285,7 +286,7 @@ class PostService:
                         opened_files.append(media_file)
                         files.append(("source", (image_path_obj.name, media_file, "application/octet-stream")))
                     response = requests.post(
-                        f"https://graph.facebook.com/v25.0/{post_id}/comments",
+                        f"{graph_base}/{post_id}/comments",
                         data=data, files=files or None, timeout=60, proxies=proxy_config or None,
                     )
                 finally:
@@ -450,7 +451,7 @@ class PostService:
                 has_comment = bool(comment_text or comment_image_paths)
                 if has_comment and post_id:
                     try:
-                        self.post_comment_with_retries(matching_page, post_id, comment_text, comment_image_paths, proxy_config)
+                        self.post_comment_with_retries(matching_page, post_id, comment_text, comment_image_paths, proxy_config, base_url)
                     except Exception as exc:
                         logger.warning("Comment bị chặn cho page=%s: %s", page_name, exc)
 

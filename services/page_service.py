@@ -203,7 +203,7 @@ class PageService:
             except Exception:
                 pass
             try:
-                resp = session.get(f"{self._base_url}/{page_id}/insights", params={"access_token": access_token, "metric": "page_views_total,page_impressions", "period": "day", "limit": 1}, timeout=15)
+                resp = session.get(f"{self._base_url}/{page_id}/insights", params={"access_token": access_token, "metric": "page_impressions", "period": "day", "limit": 1}, timeout=15)
                 payload = resp.json()
                 data = payload.get("data") or []
                 for metric in data:
