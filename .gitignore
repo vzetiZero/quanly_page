@@ -13,15 +13,16 @@ env/
 ENV/
 
 # ── Bí mật / dữ liệu cục bộ (KHÔNG đẩy lên) ─────────────
-token.txt
+# Chỉ chặn config ở thư mục gốc; vẫn GIỮ package_defaults/facebook_config.json
+/token.txt
 .env
 .env.*
-facebook_config.json
+/facebook_config.json
 package_defaults/facebook_config.local.json
 facebook_cache.sqlite3
 *.sqlite3
 *.sqlite3-journal
-facebook_scraper.log
+/facebook_scraper.log
 license_state.json
 .fb_license_state.dat
 output/

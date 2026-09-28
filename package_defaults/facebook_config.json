@@ -1,0 +1,15 @@
+{
+  "tokens": [],
+  "schedule": {
+    "enabled": false,
+    "datetime": ""
+  },
+  "concurrency": {
+    "enabled": true,
+    "threads": 3,
+    "delay": 0.5
+  },
+  "message": "",
+  "images": [],
+  "videos": []
+}
