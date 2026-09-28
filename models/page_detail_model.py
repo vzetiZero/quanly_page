@@ -9,7 +9,7 @@ logger = logging.getLogger("facebook_ui")
 # Field còn hợp lệ trên Page (Graph API hiện hành).
 PAGE_BASIC_FIELDS = [
     "id", "name", "category", "about", "description", "phone", "website",
-    "link", "verification_status", "is_published", "created_time",
+    "link", "verification_status", "is_published",
     "cover", "emails", "location", "instagram_business_account",
 ]
 # Field đếm cần Page Access Token + pages_read_engagement.
@@ -72,6 +72,7 @@ class PageDetailFetcher:
         if error is None:
             return payload or {}, errors
 
+        logger.info("Nhóm field lỗi cho page %s (%s) -> thử từng field", page_id, error.get("message", ""))
         for field in fields:
             payload, error = self._get(f"/{page_id}", {"access_token": access_token, "fields": field})
             if error is None:
@@ -100,7 +101,7 @@ class PageDetailFetcher:
         if errors:
             result["_errors"] = errors
             for item in errors:
-                logger.warning("Page field '%s' error: %s", item.get("field"), item.get("message"))
+                logger.debug("Page field '%s' error: %s", item.get("field"), item.get("message"))
         return result
 
     def fetch_page_insights(self, page_id: str, access_token: str) -> Dict[str, Any]:
