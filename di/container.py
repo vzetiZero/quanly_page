@@ -12,6 +12,7 @@ from services.post_service import PostService
 from services.config_service import ConfigService
 from services.license_service import LicenseService
 from services.page_detail_service import PageDetailService
+from services.stats_service import StatsService
 
 
 class Container:
@@ -61,6 +62,10 @@ class Container:
         self.page_detail_service = PageDetailService(
             detail_repo=self.db,
             fetcher=self.page_detail_fetcher,
+        )
+        self.stats_service = StatsService(
+            stats_repo=self.db,
+            base_url=base_url,
         )
 
         # ── Presenters (sẽ được set sau khi view tạo) ────────────

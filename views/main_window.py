@@ -1,3 +1,4 @@
+import threading
 from typing import Any, Dict, List, Optional
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -22,6 +23,7 @@ from views.log_tab import LogTab
 from views.recent_posts_tab import RecentPostsTab
 from views.settings_tab import SettingsTab
 from views.license_dialog import TrialLicenseDialog
+from views.stats_tab import StatsTab
 
 CONFIG_HEADERS = ["Page", "Tiêu đề", "Mô tả", "Đường dẫn video", "Comment", "Đường dẫn ảnh comment", "Loại đăng", "Thời gian đăng", "Trạng thái", "Link"]
 CONFIG_STATUS_COL = 8
@@ -98,7 +100,9 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
 
         self._build_post_tab()
         self._build_config_tab()
+        self._build_stats_tab()
         self._build_system_tabs()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.statusBar().addPermanentWidget(self.trial_status_label)
 
@@ -304,6 +308,11 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         queue_layout.addWidget(self.config_table)
         return queue_group
 
+    def _build_stats_tab(self) -> None:
+        self.stats_tab = StatsTab()
+        self.stats_tab.set_callbacks(self._on_refresh_stats_all, self._on_refresh_stats_selected)
+        self.tabs.addTab(self.stats_tab, "Thống kê")
+
     def _build_system_tabs(self) -> None:
         self.log_tab = LogTab()
         self.tabs.addTab(self.log_tab, "Log")
@@ -499,6 +508,48 @@ class FacebookPageManagerWindow(QtWidgets.QMainWindow):
         self.post_config_btn.setEnabled(True)
         self.post_config_btn.setText("Đăng")
         self.status_label.setText(f"Hoàn tất: thành công {success}, thất bại {fail}")
+        self._load_local_stats()
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self.tabs.widget(index) is getattr(self, "stats_tab", None):
+            self._load_local_stats()
+
+    def _load_local_stats(self) -> None:
+        try:
+            pages = self._presenter.page_list.pages
+            rows = self._container.stats_service.local_rows(pages)
+            self.stats_tab.load_rows(rows)
+            self.stats_tab.set_status(f"{len(rows)} page")
+        except Exception:
+            pass
+
+    def _on_refresh_stats_all(self) -> None:
+        self._refresh_stats(use_selected=False)
+
+    def _on_refresh_stats_selected(self) -> None:
+        self._refresh_stats(use_selected=True)
+
+    def _refresh_stats(self, use_selected: bool) -> None:
+        if use_selected:
+            pages = self._presenter.page_list.get_selected_pages(use_all=False)
+        else:
+            pages = self._presenter.page_list.pages
+        if not pages:
+            self.show_warning("Chưa có page", "Vui lòng chọn ít nhất 1 page hoặc lấy danh sách page trước.")
+            return
+        self.stats_tab.set_busy(True)
+
+        def worker():
+            try:
+                rows = self._container.stats_service.refresh(
+                    pages,
+                    on_page=lambda row: self.stats_tab.stats_progress.emit(row),
+                )
+                self.stats_tab.stats_ready.emit(rows)
+            except Exception:
+                self.stats_tab.stats_ready.emit([])
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_page_double_clicked(self, row: int, col: int) -> None:
         page_id = self._page_cell_text(row, PAGE_COL_ID)

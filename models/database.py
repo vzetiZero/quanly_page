@@ -126,6 +126,19 @@ class DatabaseManager:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_page_details_page_id ON page_details(page_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_page_details_fetched_at ON page_details(fetched_at)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS page_stats (
+                    page_key TEXT PRIMARY KEY,
+                    page_name TEXT,
+                    video_count INTEGER DEFAULT 0,
+                    video_views INTEGER,
+                    followers_count INTEGER,
+                    fan_count INTEGER,
+                    updated_at TEXT
+                )
+                """
+            )
             conn.commit()
 
     # ── Token operations ──────────────────────────────────────────
@@ -418,6 +431,78 @@ class DatabaseManager:
                 "permalink_url": permalink_url or "",
             })
         return result
+
+    # ── Page stats (thống kê video / view) ────────────────────────
+
+    def count_posted_videos_by_page(self) -> Dict[str, int]:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT page_key, COUNT(*) FROM page_video_history WHERE status = 'success' GROUP BY page_key"
+                ).fetchall()
+        except Exception:
+            return {}
+        return {str(r[0]): int(r[1]) for r in rows if r and r[0]}
+
+    def load_posted_video_ids(self, page_key: str) -> List[Dict[str, str]]:
+        if not page_key:
+            return []
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT post_id, permalink_url, video_name
+                    FROM page_video_history
+                    WHERE page_key = ? AND status = 'success' AND post_id IS NOT NULL AND post_id != ''
+                    """,
+                    (str(page_key),),
+                ).fetchall()
+        except Exception:
+            return []
+        return [{"post_id": str(r[0]), "permalink_url": r[1] or "", "video_name": r[2] or ""} for r in rows]
+
+    def save_page_stats(
+        self,
+        page_key: str,
+        page_name: str,
+        video_count: int = 0,
+        video_views: Optional[int] = None,
+        followers_count: Optional[int] = None,
+        fan_count: Optional[int] = None,
+    ) -> None:
+        if not page_key:
+            return
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO page_stats (page_key, page_name, video_count, video_views, followers_count, fan_count, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(page_key) DO UPDATE SET
+                        page_name=excluded.page_name,
+                        video_count=excluded.video_count,
+                        video_views=excluded.video_views,
+                        followers_count=excluded.followers_count,
+                        fan_count=excluded.fan_count,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        str(page_key), page_name, int(video_count or 0),
+                        video_views, followers_count, fan_count, datetime.now().isoformat(),
+                    ),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    def load_all_page_stats(self) -> List[Dict[str, Any]]:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute("SELECT * FROM page_stats ORDER BY page_name COLLATE NOCASE ASC").fetchall()
+        except Exception:
+            return []
+        return [dict(r) for r in rows]
 
     # ── Page Details (MỚI) ────────────────────────────────────────
 
